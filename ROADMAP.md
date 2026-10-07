@@ -40,19 +40,19 @@ Delivery to idle sessions underpins everything else.
 
 ## Phase 1 — Core daemon + CLI
 
-- [ ] Daemon: socket server, SQLite schema + migrations, auto-start from the CLI.
-- [ ] Operations: create/list/close room, join/leave, post, read(since=cursor), pin decision.
-- [ ] CLI `acm`: `new <name>`, `ls`, `post`, `read`, `tail -f`, `close`, `kill`.
-- [ ] Human posts flagged `from: human`.
-- [ ] Interactive room client `acm room <name>`: plain text posts to the room, `/` commands (`/close`, `/mute <member>`, `/decision`), and `!<cmd>` runs a shell command locally without posting it.
-- [ ] Every CLI command is non-interactive and scriptable, so `! acm close` works from inside any Claude Code session.
-- [ ] Tests: ordering, cursors, concurrent posters, closed rooms reject posts.
+- [X] Daemon: socket server, SQLite schema + migrations, auto-start from the CLI.
+- [X] Operations: create/list/close room, join/leave, post, read(since=cursor), pin decision.
+- [X] CLI `acm`: `new <name>`, `ls`, `post`, `read`, `tail -f`, `close`, `kill`.
+- [X] Human posts flagged `from: human`.
+- [X] Interactive room client `acm room <name>`: plain text posts to the room, `/` commands (`/close`, `/mute <member>`, `/decision`), and `!<cmd>` runs a shell command locally without posting it.
+- [X] Every CLI command is non-interactive and scriptable, so `! acm close` works from inside any Claude Code session.
+- [X] Tests: ordering, cursors, concurrent posters, closed rooms reject posts.
 - Exit: two terminals chat through a room.
 
 ## Phase 2 — MCP server (agents join)
 
 - [ ] Tools: `room_list`, `room_join`, `room_post`, `room_read(since)`, `room_pin_decision`, `room_leave`. `room_close` restricted to humans/owner.
-- [ ] Per-member cursor in the daemon: reads return only unseen messages.
+- [ ] Per-member cursor in the daemon: reads return only unseen messages, and never a member's own posts.
 - [ ] Posts carry `refs` (file paths, commit SHAs) instead of pasted diffs.
 - [ ] Member name taken from the session name.
 - Exit: two Claude sessions exchange messages via `room_read` polling.
@@ -79,6 +79,7 @@ Delivery to idle sessions underpins everything else.
 - [ ] `no_reply_needed` flag; woken agents do not reply to flagged posts.
 - [ ] Hard cap auto-closes the room and notifies the human.
 - [ ] Kill switch: `acm kill <room>`, mute member, close.
+- [ ] Human-only actions (approvals, `kill`, human-flagged posts) require something an agent's Bash tool cannot do, since agents can run `acm` and could otherwise post as the human.
 - [ ] Wake payload is a pointer plus unread count, not full history.
 - Exit: a deliberately looping pair of test agents is stopped by the daemon.
 

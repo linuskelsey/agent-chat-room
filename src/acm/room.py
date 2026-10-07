@@ -1,0 +1,130 @@
+"""Interactive room client: type to post, `/` for commands, `!` for a local shell command."""
+
+import shutil
+import subprocess
+import sys
+import threading
+
+from acm import client, fmt
+from acm.errors import AcmError
+
+try:
+    import readline
+except ImportError:  # pragma: no cover - not available on every platform
+    readline = None
+
+PROMPT = "> "
+HELP = """\
+  text            post to the room
+  /decision TEXT  post and pin a decision
+  /members        list members
+  /mute NAME      mute a member (/unmute NAME to undo)
+  /close          close the room (creator only)
+  /help           this help
+  /quit           leave the client (the room stays open)
+  !COMMAND        run a shell command locally, nothing is posted"""
+
+
+class Printer:
+    """Print from the watcher thread without clobbering a half-typed input line."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.color = fmt.use_color()
+
+    def out(self, text: str) -> None:
+        with self.lock:
+            buf = readline.get_line_buffer() if readline else ""
+            sys.stdout.write(f"\r\033[K{text}\n{PROMPT}{buf}")
+            sys.stdout.flush()
+
+
+def _watch_thread(events, room: str, printer: Printer, seen: list, done: threading.Event) -> None:
+    try:
+        for ev in events:
+            if ev["event"] == "message" and ev["message"]["id"] > seen[0]:
+                printer.out(fmt.message(ev["message"], printer.color))
+            elif ev["event"] == "closed":
+                printer.out(f"* room {room} was closed, press enter to exit")
+                done.set()
+                return
+    except (AcmError, OSError):
+        printer.out("* lost connection to the daemon, press enter to exit")
+        done.set()
+
+
+def run_room(room: str, name: str) -> None:
+    info = client.request("get_room", name=room)["room"]
+    if info["status"] != "open":
+        raise AcmError("room_closed", f"room is closed: {room}")
+    printer = Printer()
+    events = client.watch(room)  # subscribe before reading history so nothing falls in the gap
+    history = client.request("tail", room=room, n=20)["messages"]
+    client.request("read", room=room, member=name)  # joins and marks everything so far as read
+    topic = f" - {info['topic']}" if info["topic"] else ""
+    print(f"room {room}{topic}  (you are {name}, /help for commands)")
+    for m in history:
+        print(fmt.message(m, printer.color))
+    seen = [history[-1]["id"] if history else 0]
+
+    done = threading.Event()
+    threading.Thread(target=_watch_thread, args=(events, room, printer, seen, done), daemon=True).start()
+
+    while not done.is_set():
+        try:
+            raw = input(PROMPT)
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        line = raw.strip()
+        if done.is_set() or not line:
+            continue
+        if not line.startswith(("!", "/")):
+            _erase_typed(raw)  # the room echoes the message back with a timestamp, don't show it twice
+        try:
+            if line.startswith("!"):
+                subprocess.run(line[1:], shell=True)
+            elif line.startswith("/"):
+                if _command(line, room, name):
+                    return
+            else:
+                client.request("post", room=room, author=name, body=line, **{"from": "human"})
+        except AcmError as e:
+            printer.out(f"! {e.message}")
+
+
+def _erase_typed(raw: str) -> None:
+    """Remove the line(s) just typed from the terminal. A no-op when output is not a terminal."""
+    if not sys.stdout.isatty():
+        return
+    cols = shutil.get_terminal_size().columns
+    rows = max(1, -(-(len(PROMPT) + len(raw)) // cols))
+    sys.stdout.write(f"\033[{rows}A\r\033[J")
+    sys.stdout.flush()
+
+
+def _command(line: str, room: str, name: str) -> bool:
+    """Run a slash command. Returns True when the client should exit."""
+    cmd, _, rest = line[1:].partition(" ")
+    rest = rest.strip()
+    if cmd in ("quit", "q", "exit"):
+        return True
+    if cmd == "help":
+        print(HELP)
+    elif cmd == "members":
+        for m in client.request("members", room=room)["members"]:
+            print(f"  {m['name']}  {m['kind']}" + ("  [muted]" if m["muted"] else ""))
+    elif cmd in ("mute", "unmute"):
+        if not rest:
+            raise AcmError("bad_request", f"usage: /{cmd} NAME")
+        client.request(cmd, room=room, member=rest)
+    elif cmd == "decision":
+        if not rest:
+            raise AcmError("bad_request", "usage: /decision TEXT")
+        client.request("post", room=room, author=name, body=rest, kind="decision", **{"from": "human"})
+    elif cmd == "close":
+        client.request("close_room", name=room, by=name)
+        return True
+    else:
+        raise AcmError("bad_request", f"unknown command: /{cmd} (try /help)")
+    return False

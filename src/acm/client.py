@@ -83,15 +83,21 @@ class Watch:
     def __init__(self, sock: socket.socket, stream):
         self._sock = sock
         self._stream = stream
+        self._reading = False
 
     def __iter__(self):
         return self
 
     def __next__(self) -> dict:
+        self._reading = True
         try:
             line = self._stream.readline()
+        except TimeoutError:
+            raise  # only if the caller set a socket timeout; that is not the end of the stream
         except (OSError, ValueError):
             line = b""
+        finally:
+            self._reading = False
         if not line:
             self._finish()
             raise StopIteration
@@ -102,6 +108,8 @@ class Watch:
             self._sock.shutdown(socket.SHUT_RDWR)  # unblocks a reader in another thread
         except OSError:
             pass
+        if not self._reading:  # otherwise the reader releases the socket when it sees the end of the stream
+            self._finish()
 
     def _finish(self) -> None:
         for closer in (self._stream.close, self._sock.close):

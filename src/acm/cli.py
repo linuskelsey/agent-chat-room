@@ -60,8 +60,21 @@ def cmd_post(args) -> None:
         refs=args.ref,
         no_reply_needed=args.no_reply,
         **{"from": "human"},
-    )["message"]
-    print(f"posted #{msg['id']}")
+    )
+    print(f"posted #{msg['message']['id']}" + _wake_note(msg["wake"]))
+
+
+def _wake_note(wake: dict) -> str:
+    parts = []
+    if wake["woke"]:
+        parts.append("woke " + ", ".join(wake["woke"]))
+    if wake["already_pending"]:
+        parts.append("already notified: " + ", ".join(wake["already_pending"]))
+    if wake["notified"]:
+        parts.append("notified: " + ", ".join(wake["notified"]))
+    if wake["unreachable"]:
+        parts.append("not reached: " + ", ".join(wake["unreachable"]))
+    return f" ({'; '.join(parts)})" if parts else ""
 
 
 def _print_messages(res: dict, args) -> None:
@@ -100,11 +113,31 @@ def cmd_tail(args) -> None:
         for ev in events:
             if ev["event"] == "message" and ev["message"]["id"] > seen:
                 print(fmt.message(ev["message"], color), flush=True)
+            elif ev["event"] == "warning":
+                print(f"! {ev['text']}", flush=True)
             elif ev["event"] == "closed":
                 print(f"room {args.room} closed")
                 return
     except KeyboardInterrupt:
         pass
+
+
+def cmd_unread(args) -> None:
+    """Unread counts for this session's rooms. Silent when there are none, so it suits a hook."""
+    from acm import identity
+
+    name = identity.member_name() if args.hook else args.name
+    try:
+        rooms = client.request("list_rooms", status="open", member=name, autostart=not args.hook)["rooms"]
+    except AcmError:
+        if args.hook:  # a hook must never start the daemon or fail the prompt
+            return
+        raise
+    lines = [f"{r['name']}: {r['unread']} unread" for r in rooms if r["unread"]]
+    if args.hook and lines:
+        print("[acm] " + "; ".join(lines) + ". Use room_read(room=...) to catch up.")
+    elif not args.hook:
+        print("\n".join(lines) or "nothing unread")
 
 
 def cmd_members(args) -> None:
@@ -214,6 +247,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("room")
     sp.add_argument("-n", type=int, default=20)
     sp.add_argument("-f", "--follow", action="store_true")
+
+    sp = add("unread", cmd_unread, "unread counts per room")
+    sp.add_argument("--hook", action="store_true", help="for a Claude Code hook: use the session's agent name, print only when unread")
 
     sp = add("members", cmd_members, "list room members", json_flag=True)
     sp.add_argument("room")

@@ -17,6 +17,8 @@ class McpTest(unittest.TestCase):
             "ACM_RUNTIME": os.path.join(cls.tmp.name, "run"),
             "ACM_DATA": os.path.join(cls.tmp.name, "data"),
             "PYTHONPATH": SRC,
+            # an empty Claude dir keeps these fake agents from registering against the real session running the tests
+            "CLAUDE_CONFIG_DIR": os.path.join(cls.tmp.name, "claude"),
         }
         cls.acm("new", "mcproom", "-t", "mcp test", name="owner")
 

@@ -12,14 +12,16 @@ import os
 import signal
 import socket
 import sys
+import time
 import traceback
 from pathlib import Path
 
-from acm import paths
+from acm import paths, wake
 from acm.db import Store
 from acm.errors import AcmError
 
 LINE_LIMIT = 8 * 1024 * 1024
+PENDING_TTL = 120.0  # a woken agent that has not read yet is not woken again for this long
 
 
 def _need(req: dict, key: str):
@@ -33,11 +35,65 @@ class Daemon:
         self.store = store
         self.watchers: dict[str, set[asyncio.Queue]] = {}
         self.writers: set[asyncio.StreamWriter] = set()
+        self.pending: dict[tuple[str, str], float] = {}  # (room, agent) -> when the outstanding wake was sent
+        self.tasks: set[asyncio.Task] = set()
         self.stop = asyncio.Event()
 
     def _publish(self, room: str, event: dict) -> None:
         for q in self.watchers.get(room, ()):
             q.put_nowait(event)
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.ensure_future(coro)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    async def dispatch_async(self, req: dict) -> dict:
+        res = self.dispatch(req)
+        if req.get("op") == "post":
+            res["wake"] = await self.notify(res["message"])
+        return res
+
+    async def notify(self, msg: dict) -> dict:
+        """Wake the agents a message addresses and notify the humans. Reports what happened to each."""
+        room, author = msg["room"], msg["author"]
+        p = wake.plan(self.store, msg)
+        out: dict = {"woke": [], "already_pending": [], "unreachable": list(p["skipped"]), "notified": []}
+        sends = []
+        for name in p["agents"]:
+            if time.monotonic() - self.pending.get((room, name), -PENDING_TTL) < PENDING_TTL:
+                out["already_pending"].append(name)
+                continue
+            state = wake.session_state(self.store, name)
+            if state is None:
+                out["unreachable"].append(f"{name} (no live session)")
+                continue
+            text = wake.wake_text(room, author, p["everyone"], self.store.unread_count(room, name))
+            sends.append((name, state, text))
+        results = await asyncio.gather(*(wake.deliver(st["inbox"], text) for _, st, text in sends), return_exceptions=True)
+        for (name, _, _), result in zip(sends, results):
+            if isinstance(result, BaseException):
+                out["unreachable"].append(f"{name} (inbox not reachable)")
+                continue
+            self.pending[(room, name)] = time.monotonic()
+            out["woke"].append(name)
+            self._spawn(self._confirm(room, name, wake.now(), self.store.cursor_of(room, name)))
+        for human in p["humans"]:
+            out["notified"].append(human)
+            self._spawn(wake.notify_desktop(f"acm: {room}", f"{author}: {msg['body']}"))
+        return out
+
+    async def _confirm(self, room: str, name: str, sent_at: float, cursor_before: int) -> None:
+        await asyncio.sleep(wake.CONFIRM_SECS)
+        if wake.confirmed(self.store, room, name, sent_at, cursor_before):
+            return
+        text = (
+            f"{name} did not react to the wake within {int(wake.CONFIRM_SECS)}s. It may be holding messages: "
+            "set crossSessionInbound to accept in that session."
+        )
+        print(f"[{room}] {text}", file=sys.stderr, flush=True)
+        self._publish(room, {"event": "warning", "room": room, "text": text})
+        await wake.notify_desktop(f"acm: {room}", text)
 
     def dispatch(self, req: dict) -> dict:
         s = self.store
@@ -79,7 +135,12 @@ class Daemon:
             )
             self._publish(msg["room"], {"event": "message", "message": msg})
             return {"message": msg}
+        if op == "register":
+            s.register_agent(_need(req, "name"), _need(req, "pid"), _need(req, "inbox"))
+            return {}
         if op == "read":
+            if req.get("since") is None and not req.get("peek"):
+                self.pending.pop((req.get("room"), req.get("member")), None)  # they are catching up now
             return s.read(
                 _need(req, "room"),
                 _need(req, "member"),
@@ -91,6 +152,7 @@ class Daemon:
                 kind=req.get("kind", "human"),
             )
         if op == "catch_up":
+            self.pending.pop((req.get("room"), req.get("member")), None)
             return s.catch_up(
                 _need(req, "room"), _need(req, "member"), int(req.get("keep", 10)), req.get("kind", "agent")
             )
@@ -131,7 +193,7 @@ class Daemon:
                     if req.get("op") == "watch":
                         await self._watch(req, reader, writer)
                         return
-                    resp = {"ok": True, **self.dispatch(req)}
+                    resp = {"ok": True, **await self.dispatch_async(req)}
                 except AcmError as e:
                     resp = {"ok": False, "error": {"code": e.code, "message": e.message}}
                 except json.JSONDecodeError:

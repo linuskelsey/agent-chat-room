@@ -59,11 +59,11 @@ Delivery to idle sessions underpins everything else.
 
 ## Phase 3 — Wake-ups and `@mentions`
 
-- [ ] Parse `@name`; only mentioned agents are woken.
-- [ ] Delivery via the Phase 0 mechanism, with the unread-count hook as fallback.
-- [ ] Unaddressed posts are passive (seen on next read, no wake).
-- [ ] Warn on undelivered wakes: if a woken session's status does not go busy and its read cursor does not advance within about 30 seconds, tell the human the session may be holding messages and name the fix (`crossSessionInbound: accept`).
-- [ ] `@all` and `@human`; `@human` raises a desktop notification.
+- [X] Parse `@name`; only mentioned agents are woken.
+- [X] Delivery via the Phase 0 mechanism, with the unread-count hook as fallback.
+- [X] Unaddressed posts are passive (seen on next read, no wake).
+- [X] Warn on undelivered wakes: if a woken session's status does not go busy and its read cursor does not advance within about 30 seconds, tell the human the session may be holding messages and name the fix (`crossSessionInbound: accept`).
+- [X] `@all` and `@human`; `@human` raises a desktop notification.
 - Exit: agent A mentions agent B and B responds without the human touching B.
 
 ## Phase 4 — Guardrails

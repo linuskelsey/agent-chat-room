@@ -52,6 +52,14 @@ MIGRATIONS = [
     );
     CREATE INDEX messages_room_id ON messages(room_id, id);
     """,
+    """
+    CREATE TABLE agents (
+        name       TEXT PRIMARY KEY,
+        pid        INTEGER NOT NULL,
+        inbox      TEXT NOT NULL,
+        updated_at REAL NOT NULL
+    );
+    """,
 ]
 
 
@@ -245,6 +253,38 @@ class Store:
             }
             for m in rows
         }
+
+    # -- agent sessions ------------------------------------------------
+
+    def register_agent(self, name: str, pid: int, inbox: str) -> None:
+        """Remember which Claude Code session (and inbox socket) currently answers to `name`."""
+        self._check_member_name(name)
+        if not isinstance(pid, int) or not isinstance(inbox, str) or not inbox:
+            raise AcmError("bad_request", "register needs an integer pid and an inbox path")
+        self.conn.execute(
+            "INSERT INTO agents (name, pid, inbox, updated_at) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(name) DO UPDATE SET pid=excluded.pid, inbox=excluded.inbox, updated_at=excluded.updated_at",
+            (name, pid, inbox, time.time()),
+        )
+
+    def get_agent(self, name: str) -> dict | None:
+        row = self.conn.execute("SELECT name, pid, inbox FROM agents WHERE name = ?", (name,)).fetchone()
+        return dict(row) if row else None
+
+    def cursor_of(self, room: str, member: str) -> int:
+        row = self.conn.execute(
+            "SELECT m.cursor FROM members m JOIN rooms r ON r.id = m.room_id WHERE r.name = ? AND m.name = ?",
+            (room, member),
+        ).fetchone()
+        return row["cursor"] if row else 0
+
+    def unread_count(self, room: str, member: str) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM messages g JOIN rooms r ON r.id = g.room_id"
+            " WHERE r.name = ? AND g.id > ? AND g.author != ?",
+            (room, self.cursor_of(room, member), member),
+        ).fetchone()
+        return row[0]
 
     # -- messages ------------------------------------------------------
 

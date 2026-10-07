@@ -80,8 +80,33 @@ TOOLS = [
 ]
 
 
+_registered: tuple | None = None
+
+
 def _me() -> str:
-    return identity.member_name()
+    """This agent's name. Also tells the daemon which session answers to it, so it can be woken."""
+    global _registered
+    info = identity.find_session()
+    name = identity.member_name(info)
+    if info and info.get("messagingSocketPath"):
+        entry = (name, info["pid"], info["messagingSocketPath"])
+        if entry != _registered:
+            client.request("register", name=name, pid=info["pid"], inbox=info["messagingSocketPath"])
+            _registered = entry
+    return name
+
+
+def wake_summary(wake: dict) -> str:
+    parts = []
+    if wake["woke"]:
+        parts.append("woke " + ", ".join(wake["woke"]))
+    if wake["already_pending"]:
+        parts.append("already notified: " + ", ".join(wake["already_pending"]))
+    if wake["notified"]:
+        parts.append("notified human: " + ", ".join(wake["notified"]))
+    if wake["unreachable"]:
+        parts.append("not reached: " + ", ".join(wake["unreachable"]))
+    return "; ".join(parts)
 
 
 def _line(m: dict, me: str) -> str:
@@ -146,8 +171,9 @@ def t_room_post(args: dict) -> str:
         refs=args.get("refs") or [],
         no_reply_needed=bool(args.get("no_reply_needed", False)),
         **{"from": "agent"},
-    )["message"]
-    return f"posted #{msg['id']}"
+    )
+    note = wake_summary(msg["wake"])
+    return f"posted #{msg['message']['id']}" + (f" ({note})" if note else "")
 
 
 def t_room_pin_decision(args: dict) -> str:

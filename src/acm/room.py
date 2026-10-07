@@ -52,6 +52,8 @@ def _watch_thread(events, room: str, printer: Printer, seen: list, done: threadi
         for ev in events:
             if ev["event"] == "message" and ev["message"]["id"] > seen[0]:
                 printer.out(fmt.message(ev["message"], printer.color))
+            elif ev["event"] == "warning":
+                printer.out(f"! {ev['text']}")
             elif ev["event"] == "closed":
                 printer.out(f"* room {room} was closed, press enter to exit")
                 done.set()
@@ -108,7 +110,9 @@ def _input_loop(room: str, name: str, printer: Printer, done: threading.Event) -
                 if _command(line, room, name):
                     return
             else:
-                client.request("post", room=room, author=name, body=line, **{"from": "human"})
+                res = client.request("post", room=room, author=name, body=line, **{"from": "human"})
+                for who in res["wake"]["unreachable"]:
+                    printer.out(f"! not reached: {who}")
         except AcmError as e:
             printer.out(f"! {e.message}")
 

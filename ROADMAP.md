@@ -76,7 +76,7 @@ Delivery to idle sessions underpins everything else.
 - [ ] Hard ceiling set very high, only to stop runaway posts.
 - [ ] Per-agent rate limit (N messages/min).
 - [ ] Cooldown after 2 consecutive agent-only turns; a human post resets it.
-- [ ] `no_reply_needed` flag; woken agents do not reply to flagged posts.
+- [ ] `no_reply_needed` flag: a flagged post is stored and appears on the next read, but wakes nobody and raises no notification, even if it contains `@mentions`.
 - [ ] Hard cap auto-closes the room and notifies the human.
 - [ ] Kill switch: `acm kill <room>`, mute member, close.
 - [ ] Human-only actions (approvals, `kill`, human-flagged posts) require something an agent's Bash tool cannot do, since agents can run `acm` and could otherwise post as the human.
@@ -97,7 +97,12 @@ Delivery to idle sessions underpins everything else.
 - [ ] Terminal reader: `acm tail <room>` with a color per member.
 - [ ] Documented read API for viewers: `acm ls --json`, `acm read --json`, `acm watch` (event stream: new message, unread change, room closed).
 - [ ] Desktop notifications via `notify-send`.
-- [ ] Optional web or TUI viewer for long reading.
+- [ ] Terminal messaging client (TUI), laid out like a laptop messaging app: a navigable conversation list in a left column and the selected conversation on the right, one at a time.
+  - [ ] Conversation list shows each room with an unread badge, sorted by latest activity; keyboard navigation, closed rooms listed separately.
+  - [ ] Conversation pane shows pinned decisions, scrollback and live messages, with a message input at the bottom.
+  - [ ] Toggles next to the input that mirror CLI flags, such as `no_reply_needed` (`--no-reply`) and pin as decision (`--decision`).
+  - [ ] Room actions from the client: close (with confirmation), mute and unmute members, member list.
+  - [ ] Built on the public read API only, so the CLI and the client always behave the same.
 - [ ] `integrations/omarchy/`: bar widget with room count and unread badge; popup listing rooms, recent messages and a one-line input. Built on the public API only. If implemented as a Plugin Hub card: height capped ~400px, closes on outside focus, `hubOpen` gates polling.
 
 ## Phase 7 — Hardening and packaging

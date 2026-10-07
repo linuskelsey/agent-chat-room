@@ -32,6 +32,7 @@ class Daemon:
     def __init__(self, store: Store):
         self.store = store
         self.watchers: dict[str, set[asyncio.Queue]] = {}
+        self.writers: set[asyncio.StreamWriter] = set()
         self.stop = asyncio.Event()
 
     def _publish(self, room: str, event: dict) -> None:
@@ -85,6 +86,13 @@ class Daemon:
                 since=req.get("since"),
                 peek=bool(req.get("peek", False)),
                 limit=req.get("limit"),
+                exclude_own=bool(req.get("exclude_own", False)),
+                decisions=req.get("decisions", "all"),
+                kind=req.get("kind", "human"),
+            )
+        if op == "catch_up":
+            return s.catch_up(
+                _need(req, "room"), _need(req, "member"), int(req.get("keep", 10)), req.get("kind", "agent")
             )
         if op == "tail":
             return {"messages": s.tail(_need(req, "room"), int(req.get("n", 20)))}
@@ -113,6 +121,7 @@ class Daemon:
             self.watchers[room].discard(q)
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.writers.add(writer)
         try:
             while line := await reader.readline():
                 try:
@@ -134,6 +143,7 @@ class Daemon:
         except (ConnectionError, asyncio.IncompleteReadError):
             pass
         finally:
+            self.writers.discard(writer)
             writer.close()
 
 
@@ -173,6 +183,8 @@ async def serve(store: Store, sock: Path) -> None:
         loop.add_signal_handler(sig, daemon.stop.set)
     async with server:
         await daemon.stop.wait()
+        for w in list(daemon.writers):  # open watchers would otherwise keep the server from closing
+            w.close()
     sock.unlink(missing_ok=True)
 
 

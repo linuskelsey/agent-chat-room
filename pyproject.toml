@@ -11,6 +11,7 @@ dependencies = []
 
 [project.scripts]
 acm = "acm.cli:main"
+acm-mcp = "acm.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

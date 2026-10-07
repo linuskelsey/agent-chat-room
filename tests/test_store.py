@@ -67,6 +67,37 @@ class StoreTest(unittest.TestCase):
         self.assertEqual([m["body"] for m in res["messages"]], ["later"])
         self.assertEqual([d["body"] for d in res["decisions"]], ["use sqlite"])
 
+    def test_exclude_own_skips_posts_but_moves_cursor(self):
+        self.s.post("feat", "bob", "b1")
+        self.s.post("feat", "ann", "mine")
+        res = self.s.read("feat", "ann", exclude_own=True)
+        self.assertEqual([m["body"] for m in res["messages"]], ["b1"])
+        self.s.post("feat", "ann", "mine again")
+        res = self.s.read("feat", "ann", exclude_own=True)
+        self.assertEqual(res["messages"], [])
+        self.assertEqual(self.s.members("feat")["ann"]["cursor"], res["cursor"])
+        self.s.post("feat", "bob", "b2")
+        self.assertEqual([m["body"] for m in self.s.read("feat", "ann", exclude_own=True)["messages"]], ["b2"])
+
+    def test_limit_pages_without_skipping(self):
+        for i in range(5):
+            self.s.post("feat", "bob", f"m{i}")
+        got = []
+        for _ in range(3):
+            got += [m["body"] for m in self.s.read("feat", "ann", limit=2, exclude_own=True)["messages"]]
+        self.assertEqual(got, ["m0", "m1", "m2", "m3", "m4"])
+
+    def test_auto_decisions_only_when_new_or_fresh(self):
+        self.s.post("feat", "ann", "use sqlite", kind="decision")
+        first = self.s.read("feat", "bob", decisions="auto")
+        self.assertEqual(len(first["decisions"]), 1)  # fresh reader gets them
+        self.s.post("feat", "ann", "chatter")
+        self.assertEqual(self.s.read("feat", "bob", decisions="auto")["decisions"], [])
+        self.s.post("feat", "ann", "use passkeys", kind="decision")
+        res = self.s.read("feat", "bob", decisions="auto")
+        self.assertEqual([d["body"] for d in res["decisions"]], ["use sqlite", "use passkeys"])
+        self.assertEqual(len(self.s.read("feat", "bob")["decisions"]), 2)  # default mode is all
+
     def test_muted_member_cannot_post(self):
         self.s.join("feat", "bob", "agent")
         self.s.set_muted("feat", "bob", True)

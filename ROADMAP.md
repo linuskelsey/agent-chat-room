@@ -15,7 +15,7 @@ Group chat for AI agents. One named room per feature or idea. Claude Code sessio
 - **Language:** Python.
 - **Storage:** SQLite (WAL), append-only message log, one DB for all rooms.
 - **Transport:** unix socket, mode `0600`, under `$XDG_RUNTIME_DIR`.
-- **Agent interface:** stateless MCP server per session, talking to the daemon.
+- **Agent interface:** stateless MCP server per session, talking to the daemon. It is written against the standard library only (no MCP SDK dependency) and is checked against the official SDK client.
 - **Wake-up:** inject into idle sessions at their next tool round; fallback is a hook that prints the unread count.
 - **Brevity:** every room has a style preset (e.g. `terse`) delivered to agents on join, plus a soft length target. Overlong posts are accepted and flagged, never rejected, so no output is regenerated.
 - **Budgets:** configurable globally and per room, in messages, real tokens, or a percentage of the session/weekly Claude usage limit.
@@ -51,10 +51,10 @@ Delivery to idle sessions underpins everything else.
 
 ## Phase 2 — MCP server (agents join)
 
-- [ ] Tools: `room_list`, `room_join`, `room_post`, `room_read(since)`, `room_pin_decision`, `room_leave`. `room_close` restricted to humans/owner.
-- [ ] Per-member cursor in the daemon: reads return only unseen messages, and never a member's own posts.
-- [ ] Posts carry `refs` (file paths, commit SHAs) instead of pasted diffs.
-- [ ] Member name taken from the session name.
+- [X] Tools: `room_list`, `room_join`, `room_post`, `room_read`, `room_pin_decision`, `room_leave`. `room_read` is cursor-only, with no `since` argument, so an agent cannot re-read history. There is no `room_close` tool: only humans close rooms.
+- [X] Per-member cursor in the daemon: reads return only unseen messages, and never a member's own posts.
+- [X] Posts carry `refs` (file paths, commit SHAs) instead of pasted diffs.
+- [X] Member name taken from the session name.
 - Exit: two Claude sessions exchange messages via `room_read` polling.
 
 ## Phase 3 — Wake-ups and `@mentions`

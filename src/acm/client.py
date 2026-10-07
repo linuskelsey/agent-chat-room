@@ -5,7 +5,6 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
 
 from acm import paths
 from acm.errors import AcmError
@@ -60,6 +59,10 @@ def connect(autostart: bool = True) -> socket.socket:
 def _raise_if_error(resp: dict) -> dict:
     if not resp.get("ok"):
         err = resp.get("error", {})
+        if str(err.get("message", "")).startswith("unknown op:"):
+            raise AcmError(
+                "daemon_outdated", "the running daemon is older than this client, run: acm daemon restart"
+            )
         raise AcmError(err.get("code", "internal"), err.get("message", "unknown error"))
     return resp
 
@@ -74,13 +77,43 @@ def request(op: str, autostart: bool = True, **args) -> dict:
     return _raise_if_error(json.loads(line))
 
 
-def watch(room: str) -> Iterator[dict]:
-    """Subscribe to a room and return a generator of its events.
+class Watch:
+    """A live event stream for one room. Iterate it for events; `close()` ends it from any thread."""
 
-    The subscription is live as soon as this returns, so callers can fetch history afterwards
-    without missing messages that arrive in between (dedupe by message id). Close the generator
-    to disconnect.
-    """
+    def __init__(self, sock: socket.socket, stream):
+        self._sock = sock
+        self._stream = stream
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> dict:
+        try:
+            line = self._stream.readline()
+        except (OSError, ValueError):
+            line = b""
+        if not line:
+            self._finish()
+            raise StopIteration
+        return json.loads(line)
+
+    def close(self) -> None:
+        try:
+            self._sock.shutdown(socket.SHUT_RDWR)  # unblocks a reader in another thread
+        except OSError:
+            pass
+
+    def _finish(self) -> None:
+        for closer in (self._stream.close, self._sock.close):
+            try:
+                closer()
+            except OSError:
+                pass
+
+
+def watch(room: str) -> Watch:
+    """Subscribe to a room. The subscription is live as soon as this returns, so callers can fetch
+    history afterwards without missing messages that arrive in between (dedupe by message id)."""
     s = connect()
     try:
         s.sendall(json.dumps({"op": "watch", "room": room}).encode() + b"\n")
@@ -89,13 +122,4 @@ def watch(room: str) -> Iterator[dict]:
     except BaseException:
         s.close()
         raise
-
-    def events() -> Iterator[dict]:
-        try:
-            while line := f.readline():
-                yield json.loads(line)
-        finally:
-            f.close()
-            s.close()
-
-    return events()
+    return Watch(s, f)

@@ -314,19 +314,26 @@ class Store:
         since: int | None = None,
         peek: bool = False,
         limit: int | None = None,
+        exclude_own: bool = False,
+        decisions: str = "all",
+        kind: str = "human",
     ) -> dict:
         """Messages after `since`, or after the member's cursor when `since` is None.
 
         Reading from the cursor advances it unless `peek`. An explicit `since` never touches the cursor.
-        Pinned decisions are always returned separately, whatever the window.
+        `exclude_own` drops the member's own posts (the cursor still moves past them).
+        `decisions="all"` always returns every pinned decision; `"auto"` returns them only to a fresh
+        reader (cursor 0) or when the window contains a new one, so polling agents do not re-read them.
         """
         self._check_member_name(member)
+        if decisions not in ("all", "auto"):
+            raise AcmError("bad_request", f"invalid decisions mode: {decisions}")
         with self._tx():
             r = self._room(room)
             advance = since is None and not peek
             if since is None:
                 if r["status"] == "open":
-                    start = self._ensure_member(r, member, "human")["cursor"]
+                    start = self._ensure_member(r, member, kind)["cursor"]
                 else:
                     m = self.conn.execute(
                         "SELECT cursor FROM members WHERE room_id = ? AND name = ?", (r["id"], member)
@@ -334,25 +341,65 @@ class Store:
                     start = m["cursor"] if m else 0
             else:
                 start = since
-            sql = "SELECT * FROM messages WHERE room_id = ? AND id > ? ORDER BY id"
+            sql = "SELECT * FROM messages WHERE room_id = ? AND id > ?"
             args: list = [r["id"], start]
+            if exclude_own:
+                sql += " AND author != ?"
+                args.append(member)
+            sql += " ORDER BY id"
             if limit is not None:
                 sql += " LIMIT ?"
                 args.append(limit)
             rows = self.conn.execute(sql, args).fetchall()
             messages = [_message(x, room) for x in rows]
-            cursor = messages[-1]["id"] if messages else start
-            if advance and messages:
+            if limit is not None and len(rows) == limit:
+                cursor = rows[-1]["id"]  # more may follow
+            else:
+                top = self.conn.execute("SELECT MAX(id) FROM messages WHERE room_id = ?", (r["id"],)).fetchone()[0]
+                cursor = max(start, top or 0)
+            if advance and cursor != start:
                 self.conn.execute(
                     "UPDATE members SET cursor = ? WHERE room_id = ? AND name = ?", (cursor, r["id"], member)
                 )
-            decisions = [
+            pinned = [
                 _message(x, room)
                 for x in self.conn.execute(
                     "SELECT * FROM messages WHERE room_id = ? AND kind = 'decision' ORDER BY id", (r["id"],)
                 )
             ]
-        return {"messages": messages, "decisions": decisions, "cursor": cursor}
+            if decisions == "auto" and start != 0 and not any(d["id"] > start for d in pinned):
+                pinned = []
+        return {"messages": messages, "decisions": pinned, "cursor": cursor}
+
+    def catch_up(self, room: str, member: str, keep: int = 10, kind: str = "agent") -> dict:
+        """Join a room and skip to the present: the last `keep` messages and all pinned decisions.
+
+        The member's cursor moves to the newest message, so a later read returns only what is new.
+        """
+        self._check_member_name(member)
+        if kind not in MEMBER_KINDS:
+            raise AcmError("bad_request", f"invalid member kind: {kind}")
+        with self._tx():
+            r = self._open_room(room)
+            self._ensure_member(r, member, kind)
+            rows = self.conn.execute(
+                "SELECT * FROM (SELECT * FROM messages WHERE room_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id",
+                (r["id"], keep),
+            ).fetchall()
+            top = self.conn.execute("SELECT MAX(id) FROM messages WHERE room_id = ?", (r["id"],)).fetchone()[0] or 0
+            self.conn.execute(
+                "UPDATE members SET cursor = MAX(cursor, ?) WHERE room_id = ? AND name = ?", (top, r["id"], member)
+            )
+            pinned = self.conn.execute(
+                "SELECT * FROM messages WHERE room_id = ? AND kind = 'decision' ORDER BY id", (r["id"],)
+            ).fetchall()
+        return {
+            "room": self.get_room(room),
+            "members": list(self.members(room).values()),
+            "messages": [_message(x, room) for x in rows],
+            "decisions": [_message(x, room) for x in pinned],
+            "cursor": top,
+        }
 
     def tail(self, room: str, n: int) -> list[dict]:
         """The last `n` messages, oldest first. Never touches cursors."""

@@ -138,17 +138,22 @@ def cmd_daemon(args) -> None:
         except AcmError:
             client.start_daemon()
             print("daemon started")
-    elif args.action == "stop":
+    elif args.action in ("stop", "restart"):
         try:
             client.request("shutdown", autostart=False)
         except AcmError:
-            print("daemon not running")
-            return
-        for _ in range(100):
-            if not paths.socket_path().exists():
-                break
-            time.sleep(0.05)
-        print("daemon stopped")
+            if args.action == "stop":
+                print("daemon not running")
+                return
+        else:
+            for _ in range(100):
+                if not paths.socket_path().exists():
+                    break
+                time.sleep(0.05)
+            print("daemon stopped")
+        if args.action == "restart":
+            client.start_daemon()
+            print("daemon started")
     else:
         try:
             pid = client.request("ping", autostart=False)["pid"]
@@ -225,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("room")
 
     sp = add("daemon", cmd_daemon, "manage the background daemon")
-    sp.add_argument("action", choices=["start", "stop", "status"])
+    sp.add_argument("action", choices=["start", "stop", "restart", "status"])
 
     sp = add("room", cmd_room, "interactive room client")
     sp.add_argument("room")

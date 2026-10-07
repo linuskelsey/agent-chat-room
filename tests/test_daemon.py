@@ -150,6 +150,37 @@ class DaemonTest(unittest.TestCase):
         self.assertEqual(room("-c", "ghost").returncode, 0)  # already exists: just joins
         self.assertIn("made on demand", self.acm("ls", "--json").stdout)
 
+    def test_10_restart_and_outdated_daemon_message(self):
+        watcher = subprocess.Popen(  # an open watch must not keep the daemon alive after shutdown
+            [sys.executable, "-m", "acm", "--as", "w", "tail", "flow", "-f"], env=self.env, stdout=subprocess.PIPE
+        )
+        try:
+            import time
+            time.sleep(1)
+            self.assertEqual(self.acm("daemon", "restart").returncode, 0)
+            self.assertEqual(watcher.wait(timeout=10), 0)
+        finally:
+            watcher.kill()
+            watcher.stdout.close()
+        self.assertEqual(self.acm("daemon", "status").returncode, 0)
+        import socket
+        from acm import client  # an old daemon answers a newer op with "unknown op"
+        with self.assertRaises(client.AcmError) as cm:
+            client._raise_if_error({"ok": False, "error": {"code": "bad_request", "message": "unknown op: catch_up"}})
+        self.assertEqual(cm.exception.code, "daemon_outdated")
+        self.assertIn("acm daemon restart", cm.exception.message)
+
+    def test_11_room_client_exits_cleanly_after_close(self):
+        for i in range(8):  # the watcher thread used to race interpreter shutdown
+            self.acm("new", f"exit{i}", name="kit")
+            r = subprocess.run(
+                [sys.executable, "-m", "acm", "--as", "kit", "room", f"exit{i}"],
+                env=self.env, capture_output=True, text=True, input="hello\n/close\ny\n", timeout=30,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("Fatal", r.stderr)
+            self.assertEqual(self.acm("ls", "--json").returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

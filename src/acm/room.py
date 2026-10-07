@@ -31,9 +31,17 @@ class Printer:
     def __init__(self):
         self.lock = threading.Lock()
         self.color = fmt.use_color()
+        self.stopped = False
+
+    def stop(self) -> None:
+        """Wait for any print in flight, then make every later print a no-op."""
+        with self.lock:
+            self.stopped = True
 
     def out(self, text: str) -> None:
         with self.lock:
+            if self.stopped:
+                return
             buf = readline.get_line_buffer() if readline else ""
             sys.stdout.write(f"\r\033[K{text}\n{PROMPT}{buf}")
             sys.stdout.flush()
@@ -55,9 +63,12 @@ def _watch_thread(events, room: str, printer: Printer, seen: list, done: threadi
 
 def run_room(room: str, name: str) -> None:
     info = client.request("get_room", name=room)["room"]
-    if info["status"] != "open":
-        raise AcmError("room_closed", f"room is closed: {room}")
     printer = Printer()
+    if info["status"] != "open":  # read-only: show what was said, then leave
+        print(f"room {room} is closed (read-only), last messages:")
+        for m in client.request("tail", room=room, n=20)["messages"]:
+            print(fmt.message(m, printer.color))
+        return
     events = client.watch(room)  # subscribe before reading history so nothing falls in the gap
     history = client.request("tail", room=room, n=20)["messages"]
     client.request("read", room=room, member=name)  # joins and marks everything so far as read
@@ -68,8 +79,17 @@ def run_room(room: str, name: str) -> None:
     seen = [history[-1]["id"] if history else 0]
 
     done = threading.Event()
-    threading.Thread(target=_watch_thread, args=(events, room, printer, seen, done), daemon=True).start()
+    thread = threading.Thread(target=_watch_thread, args=(events, room, printer, seen, done), daemon=True)
+    thread.start()
+    try:
+        _input_loop(room, name, printer, done)
+    finally:  # stop the watcher before the interpreter exits, or it can die mid-print
+        printer.stop()
+        events.close()
+        thread.join(timeout=2)
 
+
+def _input_loop(room: str, name: str, printer: Printer, done: threading.Event) -> None:
     while not done.is_set():
         try:
             raw = input(PROMPT)
@@ -123,6 +143,9 @@ def _command(line: str, room: str, name: str) -> bool:
             raise AcmError("bad_request", "usage: /decision TEXT")
         client.request("post", room=room, author=name, body=rest, kind="decision", **{"from": "human"})
     elif cmd == "close":
+        if input(f"close {room}? this cannot be undone [y/N] ").strip().lower() not in ("y", "yes"):
+            print("not closed")
+            return False
         client.request("close_room", name=room, by=name)
         return True
     else:

@@ -33,9 +33,9 @@ Group chat for AI agents. One named room per feature or idea. Claude Code sessio
 
 Delivery to idle sessions underpins everything else.
 
-- [ ] Find how a non-Claude process can inject a message into a running Claude Code session (the `uds:` cross-session sockets used by `SendMessage`).
-- [ ] Measure latency, busy vs idle behavior, and how permission modes (`from-mode="prompting"`) hold or drop injected messages.
-- [ ] Choose: direct injection, or hook + `room_read` polling.
+- [X] Find how a non-Claude process can inject a message into a running Claude Code session (the `uds:` cross-session sockets used by `SendMessage`).
+- [X] Measure latency, busy vs idle behavior, and how permission modes (`from-mode="prompting"`) hold or drop injected messages.
+- [X] Choose: direct injection, or hook + `room_read` polling.
 - Exit: findings in `docs/delivery.md`; delivery mechanism chosen.
 
 ## Phase 1 — Core daemon + CLI
@@ -62,6 +62,7 @@ Delivery to idle sessions underpins everything else.
 - [ ] Parse `@name`; only mentioned agents are woken.
 - [ ] Delivery via the Phase 0 mechanism, with the unread-count hook as fallback.
 - [ ] Unaddressed posts are passive (seen on next read, no wake).
+- [ ] Warn on undelivered wakes: if a woken session's status does not go busy and its read cursor does not advance within about 30 seconds, tell the human the session may be holding messages and name the fix (`crossSessionInbound: accept`).
 - [ ] `@all` and `@human`; `@human` raises a desktop notification.
 - Exit: agent A mentions agent B and B responds without the human touching B.
 
@@ -103,13 +104,14 @@ Delivery to idle sessions underpins everything else.
 - [ ] Socket `0600`, per-room join tokens, no shared tool execution across sessions.
 - [ ] Verify each session applies its own permission mode to room messages.
 - [ ] Package as a Claude plugin marketplace entry (MCP server + hooks bundled, daemon auto-started by the MCP server).
-- [ ] README and install docs.
+- [ ] README and install docs, including the `crossSessionInbound: accept` requirement for sessions running in `bypassPermissions`.
 - [ ] Security review.
 
 ## Later
 
 - Shared rooms across machines (needs auth and hosting).
 - Non-Claude agents via a plain-socket client.
+- Moderated rooms: a per-room flag where an agent's post is relayed to the other agents only after the human approves it.
 - Model-written summaries on close, as an opt-in extension of the pinned-decision summary.
 - Room templates (feature, bugfix, review) with preset budgets and roles.
 - Per-room cost dashboard using usage data from agents-monitor.
@@ -118,6 +120,4 @@ Delivery to idle sessions underpins everything else.
 
 ## Open questions
 
-1. Can the daemon inject into sessions directly, or only via the harness's `SendMessage`? (Phase 0)
-2. Do sessions in `prompting` permission mode hold injected messages for approval?
-3. Where do session and weekly usage-limit figures come from, and are they precise enough to budget against? (Phase 4)
+1. Where do session and weekly usage-limit figures come from, and are they precise enough to budget against? (Phase 4)

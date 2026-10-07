@@ -15,8 +15,10 @@ SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 class FakeSession:
     """Stands in for a Claude Code session: an inbox socket plus the record Claude Code writes for it."""
 
-    def __init__(self, root, claude_dir, pid, status="idle"):
+    def __init__(self, root, claude_dir, pid, status="idle", name=None, session_id=None):
         self.pid = pid
+        self.name = name
+        self.session_id = session_id
         self.path = os.path.join(root, f"{pid}.sock")
         self.record = os.path.join(claude_dir, "sessions", f"{pid}.json")
         self.lines: list[dict] = []
@@ -32,7 +34,8 @@ class FakeSession:
         with open(self.record, "w") as f:
             json.dump(
                 {"pid": self.pid, "status": status, "statusUpdatedAt": status_at_ms,
-                 "messagingSocketPath": socket_path or self.path},
+                 "messagingSocketPath": socket_path or self.path, **({"name": self.name} if self.name else {}),
+                 **({"sessionId": self.session_id} if self.session_id else {})},
                 f,
             )
 
@@ -80,7 +83,7 @@ class WakeTest(unittest.TestCase):
         os.environ.update(
             ACM_RUNTIME=os.path.join(root, "run"), ACM_DATA=os.path.join(root, "data"),
             CLAUDE_CONFIG_DIR=os.path.join(root, "claude"), PYTHONPATH=SRC,
-            ACM_WAKE_CONFIRM_SECS="1", PATH=os.path.join(root, "bin") + os.pathsep + os.environ["PATH"],
+            ACM_ALLOW_NO_TTY="1", ACM_WAKE_CONFIRM_SECS="1", PATH=os.path.join(root, "bin") + os.pathsep + os.environ["PATH"],
         )
         from acm import client
         cls.client = client
@@ -122,18 +125,54 @@ class WakeTest(unittest.TestCase):
         self.assertEqual(wake["woke"], ["arx"])
         texts = self.sessions["arx"].wait_for(before["arx"] + 1)
         self.assertEqual(len(texts), before["arx"] + 1)
-        self.assertIn("[acm room w1] kit mentioned you", texts[-1])
-        self.assertIn('room_read(room="w1")', texts[-1])
-        self.assertNotIn("can you look", texts[-1])  # a pointer, never the message itself
+        self.assertIn('[acm room w1] kit (human) mentioned you: "hey @arx can you look?"', texts[-1])
+        self.assertIn('room_post(room="w1")', texts[-1])  # a human's text rides along, so no read is needed
         time.sleep(0.2)
         self.assertEqual(self.count("hub"), before["hub"])
         self.assertEqual(self.count("mig"), before["mig"])
+
+    def test_01b_wake_is_a_pointer_when_inline_is_off_or_the_author_is_an_agent(self):
+        r = self.room("w1b")
+        self.client.request("set_limits", room=r, updates={"inline_human": 0})
+        n = self.count("arx")
+        self.post(r, "kit", "private words @arx")
+        text = self.sessions["arx"].wait_for(n + 1)[-1]
+        self.assertIn('kit mentioned you (1 unread). Call room_read(room="w1b")', text)
+        self.assertNotIn("private words", text)
+        self.client.request("set_limits", room=r, updates={"inline_human": "default"})
+        self.client.request("read", room=r, member="arx", kind="agent")
+        n = self.count("hub")
+        self.post(r, "arx", "agent secrets @hub", kind="agent")  # agent text is never copied into another agent's prompt
+        text = self.sessions["hub"].wait_for(n + 1)[-1]
+        self.assertIn('arx mentioned you (', text)
+        self.assertIn('Call room_read(room="w1b")', text)
+        self.assertNotIn("agent secrets", text)
+
+    def test_01c_inline_wakes_trim_long_text_and_count_other_unread(self):
+        r = self.room("w1c")
+        n = self.count("mig")
+        self.post(r, "arx", "an earlier note from an agent", kind="agent")
+        self.post(r, "kit", "@mig " + "word " * 200)
+        text = self.sessions["mig"].wait_for(n + 1)[-1]
+        self.assertIn("... (cut short, room_read has the rest)", text)
+        self.assertIn('1 other unread: room_read(room="w1c")', text)
+        self.assertLess(len(text), 800)
+
+    def test_01d_replying_without_reading_allows_the_next_wake(self):
+        r = self.room("w1d")
+        n = self.count("hub")
+        self.assertEqual(self.post(r, "kit", "@hub one")["woke"], ["hub"])
+        self.sessions["hub"].wait_for(n + 1)
+        self.assertEqual(self.post(r, "kit", "@hub two")["already_pending"], ["hub"])  # it has not reacted yet
+        self.post(r, "hub", "answering from the wake text alone", kind="agent")  # no room_read
+        self.assertEqual(self.post(r, "kit", "@hub three")["woke"], ["hub"])
 
     def test_02_unaddressed_posts_are_passive(self):
         r = self.room("w2")
         before = {n: self.count(n) for n in self.sessions}
         wake = self.post(r, "kit", "just chatting, no mentions")
-        self.assertEqual(wake, {"woke": [], "already_pending": [], "unreachable": [], "notified": []})
+        self.assertEqual((wake["woke"], wake["already_pending"], wake["unreachable"], wake["notified"]), ([], [], [], []))
+        self.assertIsNone(wake["suppressed"])
         time.sleep(0.2)
         self.assertEqual({n: self.count(n) for n in self.sessions}, before)
 
@@ -251,6 +290,67 @@ class WakeTest(unittest.TestCase):
         self.assertIn("w10: 2 unread", out)
         self.client.request("read", room=r, member="hookbot", kind="agent")
         self.assertEqual(run("--hook").stdout, "")
+
+    def live_session(self, name):
+        """A fake session whose pid belongs to a real (sleeping) process, since invites check liveness."""
+        proc = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        sess = FakeSession(self.tmp.name, os.environ["CLAUDE_CONFIG_DIR"], proc.pid, name=name)
+        self.addCleanup(sess.close)
+        return sess
+
+    def test_12_add_invites_agents_by_session_name(self):
+        newbie = self.live_session("newbie")  # never called an acm tool, so it is not registered
+        r = self.room("w12", agents=("arx",))
+        res = self.client.request("invite", room=r, by="kit", names=["newbie", "ghost2", "arx"])
+        self.assertEqual(res["added"], ["newbie"])
+        self.assertEqual(res["already"], ["arx"])
+        self.assertEqual(res["unreachable"], ["ghost2 (no live session)"])
+        text = newbie.wait_for(1)[0]
+        self.assertIn("[acm room w12] kit added you to this room", text)
+        self.assertIn('room_join(room="w12")', text)
+        members = {m["name"]: m["kind"] for m in self.client.request("members", room=r)["members"]}
+        self.assertEqual(members["newbie"], "agent")
+        log = self.client.request("read", room=r, member="kit", since=0)["messages"]
+        self.assertEqual(log[-1]["body"], "kit added newbie")
+        self.assertFalse({m["name"]: m["joined"] for m in self.client.request("members", room=r)["members"]}["newbie"])
+        # now registered, so it can be woken by a mention like any other agent
+        self.client.request("read", room=r, member="newbie", kind="agent")  # its first action: it has joined
+        bodies = [m["body"] for m in self.client.request("read", room=r, member="kit", since=0)["messages"]]
+        self.assertIn("newbie joined", bodies)
+        self.assertEqual(self.post(r, "kit", "@newbie ready?")["woke"], ["newbie"])
+
+    def test_12b_joins_appear_live_in_the_room_stream(self):
+        r = self.room("w12b", agents=())
+        w = self.client.watch(r)
+        self.addCleanup(w.close)
+        w._sock.settimeout(3)
+        self.client.request("catch_up", room=r, member="latecomer", keep=5, kind="agent")
+        ev = next(w)
+        self.assertEqual(ev["event"], "message")
+        self.assertEqual((ev["message"]["body"], ev["message"]["kind"]), ("latecomer joined", "system"))
+
+    def test_13_ambiguous_names_and_closed_rooms_are_refused(self):
+        self.live_session("twin")
+        self.live_session("twin")
+        r = self.room("w13", agents=())
+        res = self.client.request("invite", room=r, by="kit", names=["twin"])
+        self.assertEqual(res["added"], [])
+        self.assertIn("2 live sessions share that name", res["unreachable"][0])
+        self.client.request("close_room", name=r, by="kit")
+        with self.assertRaises(self.client.AcmError) as cm:
+            self.client.request("invite", room=r, by="kit", names=["twin"])
+        self.assertEqual(cm.exception.code, "room_closed")
+
+    def test_14_cli_add_flag(self):
+        self.live_session("cliguy")
+        r = subprocess.run(
+            [sys.executable, "-m", "acm", "--as", "kit", "room", "-c", "w14", "--add", "cliguy,nobody"],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("added and notified: cliguy", r.stdout)
+        self.assertIn("nobody (no live session)", r.stderr)
 
 
 if __name__ == "__main__":

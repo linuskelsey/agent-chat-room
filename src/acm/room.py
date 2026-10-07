@@ -16,6 +16,8 @@ except ImportError:  # pragma: no cover - not available on every platform
 PROMPT = "> "
 HELP = """\
   text            post to the room
+  /add NAME...    add agents (by session name) and tell them to join
+  /fyi TEXT       post without waking anyone (no reply needed), even with @mentions
   /decision TEXT  post and pin a decision
   /members        list members
   /mute NAME      mute a member (/unmute NAME to undo)
@@ -142,6 +144,17 @@ def _command(line: str, room: str, name: str) -> bool:
         if not rest:
             raise AcmError("bad_request", f"usage: /{cmd} NAME")
         client.request(cmd, room=room, member=rest)
+    elif cmd == "add":
+        if not rest:
+            raise AcmError("bad_request", "usage: /add NAME...")
+        res = client.request("invite", room=room, by=name, names=rest.replace(",", " ").split())
+        for label, key in (("added and notified", "added"), ("already in the room", "already"), ("not reached", "unreachable")):
+            if res[key]:
+                print(f"  {label}: {', '.join(res[key])}")
+    elif cmd == "fyi":
+        if not rest:
+            raise AcmError("bad_request", "usage: /fyi TEXT")
+        client.request("post", room=room, author=name, body=rest, no_reply_needed=True, **{"from": "human"})
     elif cmd == "decision":
         if not rest:
             raise AcmError("bad_request", "usage: /decision TEXT")

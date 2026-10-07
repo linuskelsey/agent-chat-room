@@ -18,9 +18,54 @@ CONNECT_TIMEOUT = 2.0
 CONFIRM_SECS = float(os.environ.get("ACM_WAKE_CONFIRM_SECS", "30"))
 
 
-def wake_text(room: str, author: str, everyone: bool, unread: int) -> str:
-    who = f"{author} addressed everyone" if everyone else f"{author} mentioned you"
-    return f"[acm room {room}] {who} ({unread} unread). Call room_read(room=\"{room}\")."
+INLINE_LIMIT = 500
+
+
+def wake_text(room: str, author: str, everyone: bool, unread: int, body: str | None = None) -> str:
+    """The wake sent to an agent. With `body` (a human's message) it carries the text itself."""
+    if body is None:
+        who = f"{author} addressed everyone" if everyone else f"{author} mentioned you"
+        return f"[acm room {room}] {who} ({unread} unread). Call room_read(room=\"{room}\")."
+    text = " ".join(body.split())
+    if len(text) > INLINE_LIMIT:
+        text = text[:INLINE_LIMIT] + "... (cut short, room_read has the rest)"
+    to = "addressed everyone" if everyone else "mentioned you"
+    others = max(0, unread - 1)
+    more = f" {others} other unread: room_read(room=\"{room}\") if you need them." if others else ""
+    return (
+        f"[acm room {room}] {author} (human) {to}: \"{text}\" "
+        f"Answer with room_post(room=\"{room}\").{more}"
+    )
+
+
+def invite_text(room: str, by: str, topic: str) -> str:
+    about = f" ({topic})" if topic else ""
+    return f"[acm room {room}] {by} added you to this room{about}. Call room_join(room=\"{room}\")."
+
+
+def find_live_session(name: str) -> tuple[dict | None, str | None]:
+    """The live Claude Code session answering to `name`, found from the records Claude Code writes.
+
+    Returns (session record, None), or (None, reason). Used to invite an agent that has not yet
+    called any acm tool, so it is not in the registry.
+    """
+    found = []
+    for path in (identity.claude_dir() / "sessions").glob("*.json"):
+        try:
+            info = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(info, dict) or not isinstance(info.get("pid"), int):
+            continue
+        if identity.sanitize(str(info.get("name") or "")) != name or not info.get("messagingSocketPath"):
+            continue
+        if Path(f"/proc/{info['pid']}").exists():  # a record can outlive a crashed session
+            found.append(info)
+    if not found:
+        return None, "no live session"
+    if len(found) > 1:
+        return None, f"{len(found)} live sessions share that name"
+    return found[0], None
 
 
 def plan(store: Store, msg: dict) -> dict:
@@ -69,7 +114,7 @@ def session_state(store: Store, name: str) -> dict | None:
     if info.get("messagingSocketPath") != agent["inbox"]:
         return None
     return {"pid": agent["pid"], "inbox": agent["inbox"], "status": info.get("status"),
-            "status_at": info.get("statusUpdatedAt") or 0}
+            "status_at": info.get("statusUpdatedAt") or 0, "session_id": info.get("sessionId")}
 
 
 async def deliver(inbox: str, text: str) -> None:

@@ -17,6 +17,7 @@ class McpTest(unittest.TestCase):
             "ACM_RUNTIME": os.path.join(cls.tmp.name, "run"),
             "ACM_DATA": os.path.join(cls.tmp.name, "data"),
             "PYTHONPATH": SRC,
+            "ACM_ALLOW_NO_TTY": "1",  # tests have no terminal
             # an empty Claude dir keeps these fake agents from registering against the real session running the tests
             "CLAUDE_CONFIG_DIR": os.path.join(cls.tmp.name, "claude"),
         }
@@ -84,7 +85,9 @@ class McpTest(unittest.TestCase):
         text, _ = self.call("hub-e9", "room_read", room="mcproom")
         self.assertEqual(text, "no new messages")
         text, _ = self.call("arx-0d", "room_read", room="mcproom")
-        self.assertEqual(text, "no new messages")  # own post is not echoed back
+        self.assertEqual(text, "#2 * hub-e9 joined")  # the join line, but not arx-0d's own post
+        text, _ = self.call("arx-0d", "room_read", room="mcproom")
+        self.assertEqual(text, "no new messages")
 
     def test_03_agents_are_marked_agent_and_humans_human(self):
         self.acm("post", "mcproom", "human here", name="owner")
@@ -126,6 +129,16 @@ class McpTest(unittest.TestCase):
         # no close tool is exposed, and the creator-only rule still holds for an agent using the CLI name
         r = self.session("a", [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])
         self.assertNotIn("room_close", [t["name"] for t in r[1]["result"]["tools"]])
+
+    def test_09_join_states_the_style_and_posts_report_notices(self):
+        self.acm("new", "briefroom", "-L", "target_chars=40", name="owner")
+        text, _ = self.call("verbose", "room_join", room="briefroom")
+        self.assertIn("style: terse. Keep posts under about 40 characters.", text)
+        text, err = self.call("verbose", "room_post", room="briefroom", body="x" * 80)
+        self.assertFalse(err, text)
+        self.assertIn("over the 40-character target", text)
+        text, _ = self.call("verbose", "room_post", room="briefroom", body="@owner fyi", no_reply_needed=True)
+        self.assertIn("no reply needed, nobody woken", text)
 
     def test_08_room_list_shows_unread(self):
         self.acm("post", "mcproom", "ping", name="owner")

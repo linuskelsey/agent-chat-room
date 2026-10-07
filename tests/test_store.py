@@ -131,6 +131,60 @@ class StoreTest(unittest.TestCase):
             self.s.post("feat", "ann", f"m{i}")
         self.assertEqual([m["body"] for m in self.s.tail("feat", 2)], ["m3", "m4"])
 
+    def test_agents_joining_and_leaving_leave_a_line_in_the_room(self):
+        seen = []
+        self.s.on_system = lambda room, msg: seen.append(msg["body"])
+        self.s.catch_up("feat", "arx")  # an agent shows up
+        self.s.catch_up("feat", "arx")  # again: nothing new
+        self.s.join("feat", "bob", "human")  # humans do not get a line
+        self.s.leave("feat", "arx")
+        self.s.leave("feat", "bob")
+        self.assertEqual(seen, ["arx joined", "arx left"])
+        bodies = [m["body"] for m in self.s.read("feat", "ann", since=0)["messages"]]
+        self.assertEqual(bodies, ["arx joined", "arx left"])
+
+    def test_invited_agents_join_when_they_first_act(self):
+        seen = []
+        self.s.on_system = lambda room, msg: seen.append(msg["body"])
+        self.s.join("feat", "newbie", "agent", pending=True)
+        self.assertEqual(seen, [])
+        self.assertFalse(self.s.members("feat")["newbie"]["joined"])
+        self.s.read("feat", "newbie", kind="agent")  # first action
+        self.assertEqual(seen, ["newbie joined"])
+        self.assertTrue(self.s.members("feat")["newbie"]["joined"])
+        self.s.post("feat", "newbie", "hi", from_kind="agent")
+        self.assertEqual(seen, ["newbie joined"])  # only once
+
+    def test_system_lines_are_not_unread_messages(self):
+        self.s.catch_up("feat", "arx")
+        self.s.catch_up("feat", "zed")
+        self.assertEqual(self.s.unread_count("feat", "arx"), 0)
+        self.assertEqual(self.s.list_rooms(member="arx")[0]["unread"], 0)
+        self.s.post("feat", "ann", "real message")
+        self.assertEqual(self.s.unread_count("feat", "arx"), 1)
+
+    def test_limits_layering_and_validation(self):
+        import tempfile, os
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            cfg = os.path.join(d, "config.toml")
+            with open(cfg, "w") as f:
+                f.write('[defaults]\nmax_messages = 50\nstyle = "normal"\n')
+            with mock.patch.dict(os.environ, {"ACM_CONFIG": cfg}):
+                lim = self.s.limits("feat")
+                self.assertEqual((lim["max_messages"], lim["style"], lim["max_minutes"]), (50, "normal", 240))
+                self.assertEqual(self.s.set_limits("feat", {"max_messages": "10"})["max_messages"], 10)  # room beats file
+                self.assertEqual(self.s.set_limits("feat", {"max_messages": "default"})["max_messages"], 50)
+                self.assertIsNone(self.s.set_limits("feat", {"pause_session_pct": "none"})["pause_session_pct"])
+            with open(cfg, "w") as f:
+                f.write('[defaults]\nbogus = 1\n')
+            with mock.patch.dict(os.environ, {"ACM_CONFIG": cfg}):
+                self.assertEqual(code_of(self.s.limits, "feat"), "bad_request")
+        self.assertEqual(code_of(self.s.set_limits, "feat", {"style": "loud"}), "bad_request")
+        self.assertEqual(code_of(self.s.set_limits, "feat", {"max_messages": "-1"}), "bad_request")
+        self.assertEqual(code_of(self.s.set_limits, "feat", {"max_messages": "many"}), "bad_request")
+        self.assertEqual(code_of(self.s.set_limits, "feat", {"nonsense": "1"}), "bad_request")
+
     def test_migrations_are_idempotent(self):
         import tempfile, os
         with tempfile.TemporaryDirectory() as d:

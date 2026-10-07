@@ -19,6 +19,9 @@ class DaemonTest(unittest.TestCase):
             "ACM_RUNTIME": os.path.join(cls.tmp.name, "run"),
             "ACM_DATA": os.path.join(cls.tmp.name, "data"),
             "PYTHONPATH": SRC,
+            "ACM_ALLOW_NO_TTY": "1",  # tests have no terminal
+            # keeps the daemon from taking the real Claude session running these tests for the caller's parent
+            "CLAUDE_CONFIG_DIR": os.path.join(cls.tmp.name, "claude"),
         }
 
     @classmethod
@@ -180,6 +183,19 @@ class DaemonTest(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertNotIn("Fatal", r.stderr)
             self.assertEqual(self.acm("ls", "--json").returncode, 0)
+
+    def test_12_fyi_command_posts_without_waking(self):
+        self.acm("new", "fyiroom", name="kit")
+        r = subprocess.run(
+            [sys.executable, "-m", "acm", "--as", "kit", "room", "fyiroom"],
+            env=self.env, capture_output=True, text=True, input="/fyi thanks @bob, all done\nplain one\n", timeout=30,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        msgs = json.loads(self.acm("read", "fyiroom", "--since", "0", "--json").stdout)["messages"]
+        flags = {m["body"]: m["no_reply_needed"] for m in msgs if m["kind"] == "post"}
+        self.assertEqual(flags, {"thanks @bob, all done": True, "plain one": False})
+        self.assertEqual(self.acm("budget", "fyiroom", "--json").returncode, 0)
+        self.assertEqual(json.loads(self.acm("budget", "fyiroom", "--json").stdout)["limits"]["max_tokens"], 1000000)
 
 
 if __name__ == "__main__":

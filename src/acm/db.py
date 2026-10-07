@@ -7,6 +7,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from acm import config
 from acm.errors import AcmError
 
 ROOM_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -60,6 +61,33 @@ MIGRATIONS = [
         updated_at REAL NOT NULL
     );
     """,
+    """
+    ALTER TABLE rooms ADD COLUMN limits TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE members ADD COLUMN strikes INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE usage (
+        id             INTEGER PRIMARY KEY,
+        room_id        INTEGER NOT NULL REFERENCES rooms(id),
+        agent          TEXT NOT NULL,
+        ts             REAL NOT NULL,
+        kind           TEXT NOT NULL CHECK (kind IN ('wake', 'post')),
+        input          INTEGER NOT NULL DEFAULT 0,
+        output         INTEGER NOT NULL DEFAULT 0,
+        cache_creation INTEGER NOT NULL DEFAULT 0,
+        cache_read     INTEGER NOT NULL DEFAULT 0,
+        weighted       REAL NOT NULL
+    );
+    CREATE INDEX usage_room ON usage(room_id);
+    """,
+    """
+    ALTER TABLE members ADD COLUMN seen_at REAL;
+    UPDATE members SET seen_at = joined_at;
+    """,
+    """
+    CREATE TABLE snooze (
+        name  TEXT PRIMARY KEY,
+        until REAL NOT NULL
+    );
+    """,
 ]
 
 
@@ -91,6 +119,7 @@ class Store:
     def __init__(self, path: str | Path):
         if str(path) != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self.on_system = None  # called with (room name, message) for each system line, so the daemon can push it live
         self.conn = sqlite3.connect(str(path), isolation_level=None, timeout=10)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -173,7 +202,7 @@ class Store:
                    (SELECT MAX(ts) FROM messages g WHERE g.room_id = r.id) AS last_ts,
                    (SELECT COUNT(*) FROM messages g, members m
                      WHERE g.room_id = r.id AND m.room_id = r.id AND m.name = :member
-                       AND g.id > m.cursor AND g.author != :member) AS unread
+                       AND g.id > m.cursor AND g.author != :member AND g.kind != 'system') AS unread
               FROM rooms r
              WHERE (:status IS NULL OR r.status = :status)
              ORDER BY r.id
@@ -187,7 +216,7 @@ class Store:
             out.append(room)
         return out
 
-    def close_room(self, name: str, by: str, force: bool = False) -> dict:
+    def close_room(self, name: str, by: str, force: bool = False, reason: str | None = None) -> dict:
         """Close a room. Only the creator may close it unless `force` (the human kill switch)."""
         self._check_member_name(by)
         with self._tx():
@@ -198,38 +227,58 @@ class Store:
             self.conn.execute(
                 "UPDATE rooms SET status='closed', closed_at=?, closed_by=? WHERE id=?", (now, by, room["id"])
             )
-            how = "killed" if force and room["created_by"] != by else "closed"
-            self._insert(room["id"], "system", "system", "system", f"room {how} by {by}", now=now)
+            how = "killed" if force and reason is None and room["created_by"] != by else "closed"
+            self._insert(
+                room["id"], "system", "system", "system",
+                f"room {how} by {by}" + (f": {reason}" if reason else ""), now=now,
+            )
         return self.get_room(name)
 
     # -- members -------------------------------------------------------
 
-    def _ensure_member(self, room: sqlite3.Row, name: str, kind: str) -> sqlite3.Row:
+    def _ensure_member(self, room: sqlite3.Row, name: str, kind: str, pending: bool = False) -> sqlite3.Row:
+        """The member's row, creating it. An agent that actually shows up gets a "joined" line in the room.
+
+        `pending` adds the member without that line (an invited agent has not joined until it acts).
+        """
         row = self.conn.execute(
             "SELECT * FROM members WHERE room_id = ? AND name = ?", (room["id"], name)
         ).fetchone()
+        now = time.time()
         if row is None:
             self.conn.execute(
-                "INSERT INTO members (room_id, name, kind, joined_at) VALUES (?, ?, ?, ?)",
-                (room["id"], name, kind, time.time()),
+                "INSERT INTO members (room_id, name, kind, joined_at, seen_at) VALUES (?, ?, ?, ?, ?)",
+                (room["id"], name, kind, now, None if pending else now),
             )
-            row = self.conn.execute(
-                "SELECT * FROM members WHERE room_id = ? AND name = ?", (room["id"], name)
-            ).fetchone()
-        return row
+            if kind == "agent" and not pending:
+                self._insert(room["id"], "system", "system", "system", f"{name} joined", now=now)
+        elif row["seen_at"] is None and not pending:
+            self.conn.execute(
+                "UPDATE members SET seen_at = ? WHERE room_id = ? AND name = ?", (now, room["id"], name)
+            )
+            if row["kind"] == "agent":
+                self._insert(room["id"], "system", "system", "system", f"{name} joined", now=now)
+        return self.conn.execute(
+            "SELECT * FROM members WHERE room_id = ? AND name = ?", (room["id"], name)
+        ).fetchone()
 
-    def join(self, room: str, member: str, kind: str = "human") -> dict:
+    def join(self, room: str, member: str, kind: str = "human", pending: bool = False) -> dict:
         self._check_member_name(member)
         if kind not in MEMBER_KINDS:
             raise AcmError("bad_request", f"invalid member kind: {kind}")
         with self._tx():
-            self._ensure_member(self._open_room(room), member, kind)
+            self._ensure_member(self._open_room(room), member, kind, pending)
         return self.members(room)[member]
 
     def leave(self, room: str, member: str) -> None:
         with self._tx():
             r = self._room(room)
+            row = self.conn.execute(
+                "SELECT kind FROM members WHERE room_id = ? AND name = ?", (r["id"], member)
+            ).fetchone()
             self.conn.execute("DELETE FROM members WHERE room_id = ? AND name = ?", (r["id"], member))
+            if row is not None and row["kind"] == "agent" and r["status"] == "open":
+                self._insert(r["id"], "system", "system", "system", f"{member} left")
 
     def set_muted(self, room: str, member: str, muted: bool) -> None:
         with self._tx():
@@ -242,6 +291,7 @@ class Store:
 
     def members(self, room: str) -> dict[str, dict]:
         r = self._room(room)
+        snoozed = self.snoozed()
         rows = self.conn.execute("SELECT * FROM members WHERE room_id = ? ORDER BY joined_at, name", (r["id"],))
         return {
             m["name"]: {
@@ -250,9 +300,102 @@ class Store:
                 "joined_at": m["joined_at"],
                 "cursor": m["cursor"],
                 "muted": bool(m["muted"]),
+                "strikes": m["strikes"],
+                "joined": m["seen_at"] is not None,
+                "snoozed_until": snoozed.get(m["name"]),
             }
             for m in rows
         }
+
+    # -- limits, strikes and usage ----------------------------------------
+
+    def room_overrides(self, room: str) -> dict:
+        return json.loads(self._room(room)["limits"])
+
+    def limits(self, room: str) -> dict:
+        """The effective limits of a room: defaults, then the config file, then the room's own settings."""
+        return config.effective(self.room_overrides(room))
+
+    def set_limits(self, room: str, updates: dict) -> dict:
+        """Change a room's own settings. A value of None switches a setting off, "default" removes the override."""
+        with self._tx():
+            r = self._room(room)
+            own = json.loads(r["limits"])
+            for key, value in updates.items():
+                if isinstance(value, str) and value.lower() == "default":
+                    own.pop(key, None)
+                    config.coerce(key, None)  # still validates the key
+                else:
+                    own[key] = config.coerce(key, value)
+            self.conn.execute("UPDATE rooms SET limits = ? WHERE id = ?", (json.dumps(own), r["id"]))
+        return self.limits(room)
+
+    def add_strike(self, room: str, member: str) -> int:
+        with self._tx():
+            r = self._room(room)
+            self.conn.execute(
+                "UPDATE members SET strikes = strikes + 1 WHERE room_id = ? AND name = ?", (r["id"], member)
+            )
+            return self.conn.execute(
+                "SELECT strikes FROM members WHERE room_id = ? AND name = ?", (r["id"], member)
+            ).fetchone()[0]
+
+    def add_usage(self, room: str, agent: str, kind: str, input: int = 0, output: int = 0,
+                  cache_creation: int = 0, cache_read: int = 0) -> float:
+        weighted = config.weighted_tokens(input, output, cache_creation, cache_read)
+        r = self._room(room)
+        self.conn.execute(
+            "INSERT INTO usage (room_id, agent, ts, kind, input, output, cache_creation, cache_read, weighted)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (r["id"], agent, time.time(), kind, input, output, cache_creation, cache_read, weighted),
+        )
+        return weighted
+
+    def usage(self, room: str) -> dict:
+        r = self._room(room)
+        by_agent = {
+            row["agent"]: round(row["w"])
+            for row in self.conn.execute(
+                "SELECT agent, SUM(weighted) AS w FROM usage WHERE room_id = ? GROUP BY agent ORDER BY w DESC",
+                (r["id"],),
+            )
+        }
+        tot = self.conn.execute(
+            "SELECT COALESCE(SUM(weighted),0), COALESCE(SUM(CASE WHEN kind='wake' THEN weighted END),0),"
+            " COALESCE(SUM(CASE WHEN kind='post' THEN weighted END),0) FROM usage WHERE room_id = ?",
+            (r["id"],),
+        ).fetchone()
+        return {"weighted": round(tot[0]), "wake": round(tot[1]), "post": round(tot[2]), "by_agent": by_agent}
+
+    def usage_since(self, room: str, since: float) -> float:
+        r = self._room(room)
+        return self.conn.execute(
+            "SELECT COALESCE(SUM(weighted), 0) FROM usage WHERE room_id = ? AND kind = 'wake' AND ts >= ?",
+            (r["id"], since),
+        ).fetchone()[0]
+
+    def budget_status(self, room: str) -> dict:
+        """How much of each cap a room has used. `exceeded` and `warn` list the caps that need action."""
+        r = self._room(room)
+        limits = self.limits(room)
+        messages = self.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE room_id = ? AND kind != 'system'", (r["id"],)
+        ).fetchone()[0]
+        used = {
+            "max_messages": messages,
+            "max_minutes": (time.time() - r["created_at"]) / 60,
+            "max_tokens": self.usage(room)["weighted"],
+        }
+        exceeded, warn = [], []
+        for key, value in used.items():
+            cap = limits[key]
+            if not cap:
+                continue
+            if value >= cap:
+                exceeded.append(key)
+            elif value >= cap * limits["warn_fraction"]:
+                warn.append(key)
+        return {"used": used, "limits": limits, "exceeded": exceeded, "warn": warn}
 
     # -- agent sessions ------------------------------------------------
 
@@ -266,6 +409,27 @@ class Store:
             " ON CONFLICT(name) DO UPDATE SET pid=excluded.pid, inbox=excluded.inbox, updated_at=excluded.updated_at",
             (name, pid, inbox, time.time()),
         )
+
+    def snooze(self, name: str, seconds: float) -> float:
+        """Hold wakes for an agent (in every room) until the returned time."""
+        self._check_member_name(name)
+        if seconds <= 0:
+            raise AcmError("bad_request", "snooze duration must be positive")
+        until = time.time() + seconds
+        self.conn.execute(
+            "INSERT INTO snooze (name, until) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET until = excluded.until",
+            (name, until),
+        )
+        return until
+
+    def unsnooze(self, name: str) -> None:
+        self.conn.execute("DELETE FROM snooze WHERE name = ?", (name,))
+
+    def snoozed(self) -> dict[str, float]:
+        """Agents whose wakes are currently held, with the time each snooze ends."""
+        now = time.time()
+        self.conn.execute("DELETE FROM snooze WHERE until <= ?", (now,))
+        return {r["name"]: r["until"] for r in self.conn.execute("SELECT name, until FROM snooze")}
 
     def get_agent(self, name: str) -> dict | None:
         row = self.conn.execute("SELECT name, pid, inbox FROM agents WHERE name = ?", (name,)).fetchone()
@@ -281,7 +445,7 @@ class Store:
     def unread_count(self, room: str, member: str) -> int:
         row = self.conn.execute(
             "SELECT COUNT(*) FROM messages g JOIN rooms r ON r.id = g.room_id"
-            " WHERE r.name = ? AND g.id > ? AND g.author != ?",
+            " WHERE r.name = ? AND g.id > ? AND g.author != ? AND g.kind != 'system'",
             (room, self.cursor_of(room, member), member),
         ).fetchone()
         return row[0]
@@ -299,6 +463,16 @@ class Store:
         no_reply_needed: bool = False,
         now: float | None = None,
     ) -> int:
+        cur = self._insert_row(
+            room_id, author, kind, from_kind, body, refs, no_reply_needed, now
+        )
+        if from_kind == "system" and self.on_system is not None:
+            row = self.conn.execute("SELECT * FROM messages WHERE id = ?", (cur,)).fetchone()
+            name = self.conn.execute("SELECT name FROM rooms WHERE id = ?", (room_id,)).fetchone()["name"]
+            self.on_system(name, _message(row, name))
+        return cur
+
+    def _insert_row(self, room_id, author, kind, from_kind, body, refs, no_reply_needed, now) -> int:
         cur = self.conn.execute(
             "INSERT INTO messages (room_id, author, kind, from_kind, mentions, body, refs, no_reply_needed, ts)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -315,6 +489,11 @@ class Store:
             ),
         )
         return cur.lastrowid
+
+    def post_system(self, room: str, body: str) -> None:
+        with self._tx():
+            r = self._open_room(room)
+            self._insert(r["id"], "system", "system", "system", body)
 
     def post(
         self,
@@ -439,6 +618,7 @@ class Store:
             "messages": [_message(x, room) for x in rows],
             "decisions": [_message(x, room) for x in pinned],
             "cursor": top,
+            "limits": self.limits(room),
         }
 
     def tail(self, room: str, n: int) -> list[dict]:

@@ -45,10 +45,11 @@ class TmuxUITest(unittest.TestCase):
     def tmux(self, *args):
         return subprocess.run(["tmux", "-L", self.server, "-f", "/dev/null", *args], capture_output=True, text=True)
 
-    def start(self, name="ui", cols=110, rows=30):
+    def start(self, name="ui", cols=110, rows=30, term=None):
         self.session = name
+        prefix = f"TERM={term} " if term else ""  # xterm-like terminals report the wheel in the SGR form
         self.tmux("new-session", "-d", "-s", name, "-x", str(cols), "-y", str(rows),
-                  f"{sys.executable} -m acm --as kit ui; sleep 30")
+                  f"{prefix}{sys.executable} -m acm --as kit ui; sleep 30")
         self.addCleanup(lambda: self.tmux("kill-session", "-t", name))
         self.wait_for("acm · kit")
 
@@ -80,6 +81,7 @@ class TmuxUITest(unittest.TestCase):
 
     def room(self, name, topic="", by="kit"):
         self.client.request("create_room", name=name, by=by, topic=topic)
+        self.client.request("set_limits", room=name, updates={"agent_rate_per_min": 0})  # tests post many messages
         return name
 
     def say(self, room, author, body, kind="agent"):
@@ -247,7 +249,7 @@ class TmuxUITest(unittest.TestCase):
 
     def test_14_n_starts_a_new_conversation_and_help_is_readable(self):
         self.room("rho")
-        self.start("t14", cols=120, rows=36)
+        self.start("t14", cols=120, rows=46)  # tall enough for the whole help
         self.wait_for("rho")
         self.send("F1")
         self.wait_for("Commands (type them in the message box)")
@@ -306,10 +308,74 @@ class TmuxUITest(unittest.TestCase):
         self.assertIn("request list_rooms", text)
         self.assertIn("redraw", text)
         self.assertIn("-> ENTER", text)
-        self.assertIn("-> ESC", text)
+        self.assertIn("key ESC", text)
 
     def send_nowait(self, *keys):
         self.tmux("send-keys", "-t", self.session, *keys)
+
+    def test_17_ctrl_arrows_skip_words(self):
+        self.room("phi")
+        self.start("t17")
+        self.wait_for("phi")
+        self.send("Enter")
+        self.typed("hello world foo")
+        self.send("C-Left")
+        self.send("C-Left")
+        self.typed("X")
+        self.wait_for("hello Xworld foo")
+        self.send("C-Right")
+        self.typed("Y")
+        self.wait_for("hello XworldY foo")
+        # the same keys sent as raw escape sequences, as a terminal without terminfo support would
+        self.send("C-u")
+        self.typed("one two three")
+        self.send("\x1b[1;5D", literal=True)
+        self.typed("Z")
+        self.wait_for("one two Zthree")
+
+    def wheel(self, direction, x=70, y=10, notches=1):
+        """Send the mouse wheel as the terminal would (SGR mouse reporting): 64 is up, 65 is down."""
+        button = 64 if direction > 0 else 65
+        for _ in range(notches):
+            self.send(f"\x1b[<{button};{x};{y}M", literal=True)
+
+    def test_18_the_mouse_wheel_scrolls_the_conversation(self):
+        self.room("chi")
+        for i in range(1, 81):
+            self.say("chi", "arx", f"wheel line {i}")
+        self.start("t18", term="xterm-256color")
+        self.wait_for("wheel line 80")
+        self.assertNotIn("wheel line 20:", self.screen())
+        self.wheel(+1, notches=6)  # up over the conversation
+        self.wait_for("lines below")
+        self.assertNotIn("wheel line 80", self.screen())
+        self.wheel(-1, notches=10)  # and back down to the newest
+        self.wait_for("wheel line 80")
+        self.assertNotIn("lines below", self.screen())
+
+    def test_19_the_wheel_over_the_list_changes_conversation_and_pgup_still_works(self):
+        self.room("psi")
+        self.room("omega")
+        self.say("psi", "arx", "message in psi")
+        time.sleep(0.05)
+        self.say("omega", "arx", "message in omega")
+        self.start("t19", term="xterm-256color")
+        self.wait_for("message in omega")  # the busiest conversation is open
+        self.wheel(-1, x=5, y=3)  # down over the list: next conversation
+        self.wait_for("message in psi")
+        self.wheel(+1, x=5, y=3)
+        self.wait_for("message in omega")
+
+    def test_20_pgup_and_pgdn_still_scroll(self):
+        self.room("rho2")
+        for i in range(1, 81):
+            self.say("rho2", "arx", f"page line {i}")
+        self.start("t20")
+        self.wait_for("page line 80")
+        self.send("PageUp")
+        self.wait_for("lines below")
+        self.send("PageDown")
+        self.gone("lines below")
 
     def test_10_the_client_survives_a_daemon_restart(self):
         self.room("mu")

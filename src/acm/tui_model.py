@@ -30,6 +30,7 @@ class Room:
     loaded: bool = False
     exhausted: bool = False  # everything older has been loaded
     draft: str = ""
+    waiting: set = field(default_factory=set)  # agents stuck on an approval or question in their own window
 
     @property
     def activity(self) -> float:
@@ -168,6 +169,13 @@ class Model:
                 self.refresh_members(room)
             return True
         if kind == "warning":
+            self.notice = f"{name}: {ev['text']}"
+            return True
+        if kind == "quiet":
+            self.notice = f"{name}: it is your turn, nobody is working"
+            return True
+        if kind == "attention":
+            (room.waiting.add if ev["waiting"] else room.waiting.discard)(ev["agent"])
             self.notice = f"{name}: {ev['text']}"
             return True
         return False

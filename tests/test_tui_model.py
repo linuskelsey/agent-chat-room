@@ -130,6 +130,24 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(m.notice, "tj: max_messages reached")
         self.assertFalse(m.apply({"event": "message", "room_name": "no-such-room", "message": {"id": 1, "ts": 0, "kind": "post", "author": "x", "body": "y"}}))
 
+    def test_05b_an_agent_waiting_on_the_human_is_tracked_and_cleared(self):
+        m = self.model()
+        r = self.room("tw", agents=("arx",))
+        m.load_rooms()
+        up = {"event": "attention", "room_name": r, "agent": "arx", "waiting": True, "text": "arx is waiting for you in its own Claude Code window"}
+        self.assertTrue(m.apply(up))
+        self.assertEqual(m.rooms[r].waiting, {"arx"})
+        self.assertIn("arx is waiting for you", m.notice)
+        m.apply({**up, "waiting": False, "text": "arx is no longer waiting"})
+        self.assertEqual(m.rooms[r].waiting, set())
+
+    def test_05c_a_quiet_room_event_leaves_a_notice(self):
+        m = self.model()
+        r = self.room("tq2")
+        m.load_rooms()
+        self.assertTrue(m.apply({"event": "quiet", "room_name": r, "text": f"{r} is quiet"}))
+        self.assertIn("it is your turn", m.notice)
+
     def test_06_a_message_in_an_unknown_room_loads_it(self):
         m = self.model()
         r = self.room("tk")

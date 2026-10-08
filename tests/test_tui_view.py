@@ -108,6 +108,17 @@ class ViewTest(unittest.TestCase):
         self.assertIn("you: mine", text)
         self.assertIn("bob (human): theirs", text)
 
+    def test_a_waiting_agent_shows_in_the_list_and_the_title(self):
+        m = self.model()
+        m.rooms["login-redesign"].waiting = {"arx"}
+        _, c = self.render(m)
+        text, lines = c.text(), c.lines()
+        self.assertIn("⚠ arx waiting for you", lines[0])
+        self.assertRegex(lines[1], r"^ !\s+login-redesign")  # the list marks the room too, ahead of the unread dot
+        m.rooms["login-redesign"].waiting = set()
+        _, c = self.render(m)
+        self.assertNotIn("waiting for you", c.text())
+
     def test_closed_rooms_are_read_only(self):
         m = FakeModel([room("done", status="closed", messages=[msg(1, "arx", "bye")])])
         m.selected = "done"
@@ -229,6 +240,36 @@ class ViewTest(unittest.TestCase):
         self.assertEqual(view.text, "ell日")
         view.edit("KILL_LINE")
         self.assertEqual((view.text, view.cursor), ("", 0))
+
+    def test_ctrl_arrows_move_by_word(self):
+        view = tui.View(self.model())
+        for ch in "hello big  world":
+            view.edit(ch)
+        view.edit("WORD_LEFT")
+        self.assertEqual(view.cursor, 11)  # start of "world"
+        view.edit("WORD_LEFT")
+        self.assertEqual(view.cursor, 6)  # start of "big"
+        view.edit("WORD_LEFT")
+        self.assertEqual(view.cursor, 0)
+        view.edit("WORD_LEFT")
+        self.assertEqual(view.cursor, 0)  # stays at the start
+        view.edit("WORD_RIGHT")
+        self.assertEqual(view.cursor, 5)  # end of "hello"
+        view.edit("WORD_RIGHT")
+        self.assertEqual(view.cursor, 9)  # end of "big", across the space
+        view.edit("WORD_RIGHT")
+        view.edit("WORD_RIGHT")
+        self.assertEqual(view.cursor, len(view.text))  # stays at the end
+
+    def test_modified_arrows_are_recognised_however_the_terminal_sends_them(self):
+        for seq in ("[1;5D", "[5D", "Od", "[1;3D"):
+            self.assertEqual(tui.decode_escape(seq), ["WORD_LEFT"], seq)
+        for seq in ("[1;5C", "[5C", "Oc", "[1;3C"):
+            self.assertEqual(tui.decode_escape(seq), ["WORD_RIGHT"], seq)
+        self.assertEqual(tui.decode_escape(""), ["ESC"])  # a lone Esc
+        self.assertEqual(tui.decode_escape("q"), ["ESC", "q"])  # an Alt-q stays Esc then q
+        self.assertEqual(tui.decode_escape("[9z"), ["ESC", "[", "9", "z"])  # unknown: nothing is swallowed
+        self.assertEqual((tui.KEYMAP["kLFT5"], tui.KEYMAP["kRIT5"]), ("WORD_LEFT", "WORD_RIGHT"))
 
     def test_history_recall(self):
         view = tui.View(self.model())
@@ -405,6 +446,28 @@ class ControllerTest(unittest.TestCase):
         self.assertEqual((m.selected, self.view.text), ("r", "half typed for r"))
         self.ctl.key("NEXT")
         self.assertEqual(self.view.text, "for other")
+
+    def test_the_wheel_scrolls_three_lines_over_a_conversation_and_changes_conversation_over_the_list(self):
+        msgs = [msg(i, "arx", f"line {i}") for i in range(1, 61)]
+        m = FakeModel([room("a", messages=msgs, last_ts=2), room("b", last_ts=1)])
+        m.selected = "a"
+        m.request = lambda op, **kw: {"members": []} if op == "members" else {"messages": [], "decisions": []}
+        view = tui.View(m)
+        ctl = tui.Controller(view, lambda p: "")
+        ctl.wheel(+1, x=60, left=25)  # up over the conversation
+        self.assertEqual(view.scroll["a"], 3)
+        ctl.wheel(+1, x=60, left=25)
+        self.assertEqual(view.scroll["a"], 6)
+        ctl.wheel(-1, x=60, left=25)
+        ctl.wheel(-1, x=60, left=25)
+        ctl.wheel(-1, x=60, left=25)
+        self.assertEqual(view.scroll["a"], 0)  # never below the newest
+        ctl.wheel(-1, x=5, left=25)  # down over the list: the next conversation
+        self.assertEqual(m.selected, "b")
+        ctl.wheel(+1, x=5, left=25)
+        self.assertEqual(m.selected, "a")
+        ctl.wheel(+1, x=5, left=0)  # no list on screen (a narrow terminal): it scrolls
+        self.assertEqual(view.scroll["a"], 3)
 
     def test_f1_opens_help_and_f4_hides_decisions(self):
         self.setup()

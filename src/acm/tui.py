@@ -172,6 +172,7 @@ HELP_SECTIONS = [
         ("F3", "pin as a decision"),
         ("F4", "show or hide pinned decisions"),
         ("Up / Down", "recall what you sent earlier"),
+        ("Ctrl-Left / Ctrl-Right", "move by word"),
         ("Ctrl-A / Ctrl-E", "start / end of the line"),
         ("Ctrl-U", "clear the line"),
         ("Ctrl-K / Ctrl-W", "cut to the end / cut a word"),
@@ -276,7 +277,7 @@ class View:
                 canvas.put(y, 1, clip("closed", width - 1), "dim")
                 continue
             badge = f" {room.unread}" if room.unread else ""
-            mark = "●" if room.unread else (" " if room.open else "·")
+            mark = "!" if room.waiting else ("●" if room.unread else (" " if room.open else "·"))
             label = clip(f"{mark} {room.name}", width - len(badge) - 1)
             selected = room.name == m.selected
             here = "selected" if self.focus == "list" else "unread"  # bold, not reversed, while typing elsewhere
@@ -321,7 +322,8 @@ class View:
             self.draw_input(canvas, input_y, toggles_y, sep_y, x0, width, None)
             return
         members = f"{room.member_count} members" if room.members is None else f"{len(room.members)} members"
-        right = f"{members}{' · closed' if not room.open else ''}"
+        waiting = f"⚠ {', '.join(sorted(room.waiting))} waiting for you · " if room.waiting else ""
+        right = f"{waiting}{members}{' · closed' if not room.open else ''}"
         head = f" {room.name}" + (f" · {textsafe.one_line(room.topic)}" if room.topic else "")
         focused = self.focus == "input"
         canvas.fill(0, x0, width, "reverse" if focused else "title")
@@ -444,6 +446,8 @@ class View:
             "KILL_LINE": lambda: self._delete(0, len(self.text)),
             "KILL_END": lambda: self._delete(self.cursor, len(self.text)),
             "KILL_WORD": lambda: self._delete(self._word_start(), self.cursor),
+            "WORD_LEFT": lambda: self._move(self._word_start()),
+            "WORD_RIGHT": lambda: self._move(self._word_end()),
         }
         if key in edits:
             edits[key]()
@@ -463,6 +467,14 @@ class View:
             i -= 1
         while i > 0 and self.text[i - 1] != " ":
             i -= 1
+        return i
+
+    def _word_end(self) -> int:
+        i = self.cursor
+        while i < len(self.text) and self.text[i] == " ":
+            i += 1
+        while i < len(self.text) and self.text[i] != " ":
+            i += 1
         return i
 
     def recall(self, step: int) -> None:
@@ -597,19 +609,26 @@ class Controller:
     def switch(self, step: int) -> None:
         self.go(lambda: self.model.move(step))
 
-    def scroll(self, direction: int) -> None:
+    def scroll(self, direction: int, lines: int = 8) -> None:
+        """Scroll the conversation `lines` lines: up (+1) towards older messages, or down (-1) towards the newest."""
         v, m = self.view, self.model
         room = m.current
         if room is None:
             return
-        at = v.scroll.get(room.name, 0) + direction * 8
-        if at < 0:
-            at = 0
+        at = max(0, v.scroll.get(room.name, 0) + direction * lines)
         v.scroll[room.name] = at
         # reaching the top of what is loaded pulls in an earlier page
-        if direction > 0 and at >= max(0, len(v.message_lines(room, 80)) - 8):
+        if direction > 0 and at >= max(0, len(v.message_lines(room, 80)) - lines):
             if m.load_older():
                 v.scroll[room.name] = at
+
+    def wheel(self, direction: int, x: int, left: int) -> None:
+        """The mouse wheel (up is +1). Over the conversation list it moves between conversations; anywhere
+        else it scrolls the conversation three lines a notch."""
+        if left and x < left:
+            self.switch(-direction)
+        else:
+            self.scroll(direction, lines=3)
 
     def submit(self) -> None:
         v, m = self.view, self.model
@@ -709,7 +728,22 @@ KEYMAP = {
     "KEY_UP": "UP", "KEY_DOWN": "DOWN", "KEY_LEFT": "LEFT", "KEY_RIGHT": "RIGHT", "KEY_HOME": "HOME", "KEY_END": "END",
     "KEY_BACKSPACE": "BACKSPACE", "KEY_DC": "DELETE", "KEY_PPAGE": "PPAGE", "KEY_NPAGE": "NPAGE", "KEY_RESIZE": "RESIZE",
     "KEY_F(1)": "F1", "KEY_F(2)": "F2", "KEY_F(3)": "F3", "KEY_F(4)": "F4", "KEY_ENTER": "ENTER",
+    # modified arrows, as terminfo names them: Ctrl-Left/Right and Alt-Left/Right move by word
+    "kLFT5": "WORD_LEFT", "kRIT5": "WORD_RIGHT", "kLFT3": "WORD_LEFT", "kRIT3": "WORD_RIGHT",
 }
+# The same keys as raw escape sequences, for terminals whose terminfo does not describe them.
+ESCAPE_KEYS = {
+    "[1;5D": "WORD_LEFT", "[1;5C": "WORD_RIGHT", "[1;3D": "WORD_LEFT", "[1;3C": "WORD_RIGHT",
+    "[5D": "WORD_LEFT", "[5C": "WORD_RIGHT", "Od": "WORD_LEFT", "Oc": "WORD_RIGHT",
+    "[1;2D": "LEFT", "[1;2C": "RIGHT",
+}
+
+
+def decode_escape(sequence: str) -> list[str]:
+    """Keys for the characters that followed an Esc: one key if they spell a known sequence, otherwise Esc and then
+    each character as typed (so an Alt-q still arrives as Esc then q)."""
+    key = ESCAPE_KEYS.get(sequence)
+    return [key] if key else ["ESC", *sequence]
 CONTROL = {
     "\n": "ENTER", "\r": "ENTER", "\t": "TAB", "\x1b": "ESC", "\x7f": "BACKSPACE", "\x08": "BACKSPACE",
     "\x01": "HOME", "\x05": "END", "\x15": "KILL_LINE", "\x0b": "KILL_END", "\x17": "KILL_WORD",
@@ -793,6 +827,25 @@ class App:
         finally:
             view.prompt = None
 
+    def following_chars(self) -> str:
+        """What arrives within a few milliseconds of an Esc: the rest of a key sequence, or nothing."""
+        out = ""
+        self.scr.timeout(15)
+        try:
+            while len(out) < 8:
+                try:
+                    ch = self.scr.get_wch()
+                except self.curses.error:
+                    break
+                if not isinstance(ch, str):
+                    break
+                out += ch
+                if ch.isalpha() or ch == "~":  # the final character of a sequence
+                    break
+        finally:
+            self.scr.timeout(120)
+        return out
+
     def trace(self, message: str) -> None:
         if self.log:
             self.log.write(f"{time.monotonic() - self.t0:9.3f}  {message}\n")
@@ -863,7 +916,7 @@ class App:
                 c.init_pair(1 + i, colour, -1)
         self.scr.keypad(True)
         self.scr.timeout(120)
-        if os.environ.get("ACM_MOUSE"):  # opt-in: capturing the mouse stops the terminal's own copy and paste
+        if not os.environ.get("ACM_NO_MOUSE"):  # the wheel scrolls; hold Shift to select text, as with any mouse-aware program
             c.mousemask(c.ALL_MOUSE_EVENTS)
         self.model.load_rooms()
         if self.model.order():
@@ -881,6 +934,13 @@ class App:
                 raw = self.scr.get_wch()
             except c.error:
                 continue
+            if raw == "\x1b":  # a bare Esc, or the start of a key sequence the terminal info did not recognise
+                keys = decode_escape(self.following_chars())
+                self.trace(f"key ESC + {keys!r}")
+                for key in keys:
+                    self.controller.key(key)
+                dirty = True
+                continue
             self.trace(f"key {raw!r} -> {translate(raw) if not (isinstance(raw, int) and raw == c.KEY_MOUSE) else 'mouse'}")
             if isinstance(raw, int) and raw == c.KEY_MOUSE:
                 try:
@@ -889,9 +949,9 @@ class App:
                     continue
                 left, _ = self.view.widths(self.scr.getmaxyx()[1])
                 if state & getattr(c, "BUTTON4_PRESSED", 0):
-                    self.controller.key("PPAGE")
+                    self.controller.wheel(+1, mx, left)
                 elif state & getattr(c, "BUTTON5_PRESSED", 0):
-                    self.controller.key("NPAGE")
+                    self.controller.wheel(-1, mx, left)
                 elif state & (c.BUTTON1_CLICKED | c.BUTTON1_PRESSED) and mx < left:
                     self.controller.click(my)
                 dirty = True

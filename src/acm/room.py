@@ -55,7 +55,7 @@ def _watch_thread(events, room: str, printer: Printer, seen: list, done: threadi
         for ev in events:
             if ev["event"] == "message" and ev["message"]["id"] > seen[0]:
                 printer.out(fmt.message(ev["message"], printer.color))
-            elif ev["event"] == "warning":
+            elif ev["event"] in ("warning", "attention", "quiet"):
                 printer.out(f"! {ev['text']}")
             elif ev["event"] == "closed":
                 printer.out(f"* room {room} was closed, press enter to exit")

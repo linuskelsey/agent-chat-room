@@ -19,6 +19,7 @@ SPEC = {
     "max_tokens": (int, 1000000, "stop agents waking each other after its agents have used this many weighted tokens"),
     "agent_rate_per_min": (int, 6, "posts per minute allowed for one agent (an overlong post counts double)"),
     "cooldown_turns": (int, 2, "agent-to-agent wakes allowed in a row before a human message is needed"),
+    "notify_when_quiet": (int, 0, "1 = desktop notification when an agent has posted, nobody was woken and no agent is still working, so it is your turn"),
     "confirm_wake_tokens": (int, 100000, "the room client asks before sending a message that would wake agents costing about this many tokens (0 = never ask)"),
     "inline_human": (int, 1, "put a human's message text in the wake sent to a mentioned agent, saving it a read (0 = pointer only)"),
     "export_dir": (str, None, "directory where a closed room's summary is written as <room>.md (default: acm's data dir, rooms/)"),

@@ -302,7 +302,7 @@ def cmd_tail(args) -> None:
         for ev in events:
             if ev["event"] == "message" and ev["message"]["id"] > seen:
                 print(fmt.message(ev["message"], color), flush=True)
-            elif ev["event"] == "warning":
+            elif ev["event"] in ("warning", "attention", "quiet"):
                 print(f"! {ev['text']}", flush=True)
             elif ev["event"] == "closed":
                 print(f"room {args.room} closed")

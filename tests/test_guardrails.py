@@ -60,6 +60,7 @@ class GuardrailTest(unittest.TestCase):
             CLAUDE_CONFIG_DIR=os.path.join(root, "claude"), PYTHONPATH=SRC,
             ACM_CONFIG=os.path.join(root, "none.toml"), ACM_LIMITS_FILE=cls.limits_file,
             ACM_ALLOW_NO_TTY="1", ACM_WAKE_CONFIRM_SECS="60", ACM_TICK_SECS="1", ACM_ACCOUNT_POLL_SECS="0.2",
+            ACM_ATTENTION_SECS="0.5", ACM_ATTENTION_POLL_SECS="0.1", ACM_QUIET_SECS="0.3", ACM_QUIET_POLL_SECS="0.1",
             PATH=os.path.join(root, "bin") + os.pathsep + os.environ["PATH"],
         )
         from acm import client
@@ -161,9 +162,9 @@ class GuardrailTest(unittest.TestCase):
 
     def test_04_style_and_target_are_per_room(self):
         r = self.room("g4", style="normal")
-        self.assertEqual(self.post(r, "arx", "x" * 900)["notices"], [])
+        self.assertEqual(self.post(r, "arx", "x" * 900, no_reply_needed=True)["notices"], [])
         r2 = self.room("g4b", target_chars=50)
-        self.assertEqual(len(self.post(r2, "arx", "x" * 60)["notices"]), 1)
+        self.assertEqual(len(self.post(r2, "arx", "x" * 60, no_reply_needed=True)["notices"]), 1)
 
     # -- rate limit and cooldown -----------------------------------------
 
@@ -307,6 +308,177 @@ class GuardrailTest(unittest.TestCase):
         self.assertNotEqual(run("snooze", "mig", "soon").returncode, 0)
         self.assertIn("woken again", run("snooze", "mig", "off").stdout)
         self.assertNotIn("mig", self.client.request("budget", room="g10c")["snoozed"])
+
+    # -- an agent stuck on an approval in its own window ---------------------
+
+    def attention_events(self, w, want, timeout=4):
+        w._sock.settimeout(timeout)
+        got = []
+        try:
+            while len(got) < want:
+                ev = next(w)
+                if ev["event"] == "attention":
+                    got.append(ev)
+        except (TimeoutError, StopIteration):
+            pass
+        return got
+
+    def test_10m_a_woken_agent_stuck_on_an_approval_tells_the_human(self):
+        r = self.room("g10m", agents=("arx",))
+        w = self.client.watch(r)
+        self.addCleanup(w.close)
+        self.post(r, "kit", "@arx please repoint the link", kind="human")
+        self.sessions["arx"].wait_for(self.count("arx"))
+        self.sessions["arx"].write_record("waiting", int(time.time() * 1000))  # an approval dialog opens in its window
+        up = self.attention_events(w, 1)
+        self.assertEqual((up[0]["agent"], up[0]["waiting"]), ("arx", True))
+        self.assertIn("arx is waiting for you in its own Claude Code window", up[0]["text"])
+        end = time.time() + 3
+        while time.time() < end and "waiting for you" not in self.notified():
+            time.sleep(0.05)
+        self.assertIn("arx is waiting for you in its own Claude Code window", self.notified())  # under whichever room told first
+        self.sessions["arx"].write_record("busy", int(time.time() * 1000))  # the human approved it
+        down = self.attention_events(w, 1)
+        self.assertEqual((down[0]["agent"], down[0]["waiting"]), ("arx", False))
+        self.sessions["arx"].write_record("idle", int(time.time() * 1000) + 500)
+
+    def test_10n_a_moment_of_waiting_is_not_reported(self):
+        r = self.room("g10n", agents=("hub",))
+        w = self.client.watch(r)
+        self.addCleanup(w.close)
+        self.post(r, "kit", "@hub quick one", kind="human")
+        self.sessions["hub"].wait_for(self.count("hub"))
+        self.sessions["hub"].write_record("waiting", int(time.time() * 1000))
+        time.sleep(0.2)  # shorter than the threshold
+        self.sessions["hub"].write_record("idle", int(time.time() * 1000) + 500)
+        self.assertEqual(self.attention_events(w, 1, timeout=1.5), [])
+
+    def test_10o_only_the_first_room_notifies_the_desktop(self):
+        a = self.room("g10oa", agents=("mig",))
+        b = self.room("g10ob", agents=("mig",))
+        self.post(a, "kit", "@mig in a", kind="human")
+        self.post(b, "kit", "@mig in b", kind="human")
+        self.sessions["mig"].wait_for(self.count("mig"))
+        self.sessions["mig"].write_record("waiting", int(time.time() * 1000))
+        wa, wb = self.client.watch(a), self.client.watch(b)
+        self.addCleanup(wa.close)
+        self.addCleanup(wb.close)
+        self.assertTrue(self.attention_events(wa, 1) and self.attention_events(wb, 1))  # both rooms are told
+        time.sleep(0.5)
+        self.assertEqual(self.notified().count("mig is waiting for you"), 1)  # but the desktop only once
+        self.sessions["mig"].write_record("idle", int(time.time() * 1000) + 500)
+
+    # -- "it is your turn" -------------------------------------------------
+
+    def quiet_events(self, w, timeout=2.5):
+        w._sock.settimeout(timeout)
+        try:
+            while True:
+                ev = next(w)
+                if ev["event"] == "quiet":
+                    return ev
+        except (TimeoutError, StopIteration):
+            return None
+
+    def reset_sessions(self):
+        for name in ("arx", "hub", "mig"):
+            self.sessions[name].write_record("idle", int(time.time() * 1000) + 500)
+
+    def test_10p_a_quiet_room_tells_the_human_it_is_their_turn_when_asked_to(self):
+        self.reset_sessions()
+        r = self.room("g10p", agents=("arx", "hub"), notify_when_quiet=1)
+        w = self.client.watch(r)
+        self.addCleanup(w.close)
+        self.post(r, "arx", "I have finished my part, no one addressed")
+        ev = self.quiet_events(w)
+        self.assertIsNotNone(ev)
+        self.assertIn("g10p is quiet", ev["text"])
+        end = time.time() + 3
+        while time.time() < end and "g10p is quiet" not in self.notified():
+            time.sleep(0.05)
+        self.assertIn("g10p is quiet: nobody is working and nobody was woken, so it is your turn", self.notified())
+
+    def test_10q_it_waits_until_every_agent_has_stopped(self):
+        import threading
+
+        self.reset_sessions()
+        r = self.room("g10q", agents=("arx", "hub"), notify_when_quiet=1)
+        w = self.client.watch(r)
+        self.addCleanup(w.close)
+        seen = []
+        threading.Thread(target=lambda: [seen.append(e) for e in w if e["event"] == "quiet"], daemon=True).start()
+        self.sessions["hub"].write_record("busy", int(time.time() * 1000))  # hub is still working
+        self.post(r, "arx", "done on my side")
+        time.sleep(1.2)
+        self.assertEqual(seen, [])  # not yet
+        self.sessions["hub"].write_record("idle", int(time.time() * 1000) + 500)
+        end = time.time() + 3
+        while time.time() < end and not seen:
+            time.sleep(0.05)
+        self.assertEqual(len(seen), 1)  # now it is, and only once
+
+    def test_10r_it_stays_silent_when_something_else_happens(self):
+        self.reset_sessions()
+        r = self.room("g10r", agents=("arx", "hub"), notify_when_quiet=1)
+        w = self.client.watch(r)
+        self.addCleanup(w.close)
+        self.post(r, "arx", "@hub over to you")  # a wake was sent: not quiet
+        self.assertIsNone(self.quiet_events(w, timeout=1.0))
+        self.client.request("read", room=r, member="hub", kind="agent")
+        self.post(r, "arx", "no one addressed")
+        self.post(r, "kit", "I am here", kind="human")  # someone spoke straight after: the room is not quiet
+        self.assertIsNone(self.quiet_events(w, timeout=1.2))
+
+    def test_10s_it_does_not_repeat_what_a_mention_of_the_human_already_did(self):
+        self.reset_sessions()
+        r = self.room("g10s", agents=("arx",), notify_when_quiet=1)
+        self.client.request("join", room=r, member="boss", kind="human")
+        w = self.client.watch(r)
+        self.addCleanup(w.close)
+        self.post(r, "arx", "@boss decision needed")  # the human was notified directly
+        self.assertIsNone(self.quiet_events(w, timeout=1.0))
+
+    def test_10t_it_is_off_unless_asked_for(self):
+        self.reset_sessions()
+        r = self.room("g10t", agents=("arx", "hub"))
+        self.assertEqual(self.budget(r)["limits"]["notify_when_quiet"], 0)
+        w = self.client.watch(r)
+        self.addCleanup(w.close)
+        self.post(r, "arx", "done, no one addressed")
+        self.assertIsNone(self.quiet_events(w, timeout=1.2))
+
+    def test_10u_a_cap_or_cooldown_that_stopped_the_room_is_named(self):
+        self.reset_sessions()
+        r = self.room("g10u", agents=("arx", "hub"), notify_when_quiet=1, cooldown_turns=1)
+        w = self.client.watch(r)
+        self.addCleanup(w.close)
+        self.post(r, "kit", "@arx start", kind="human")
+        self.client.request("read", room=r, member="arx", kind="agent")
+        self.post(r, "arx", "@hub please review")  # the one agent-to-agent wake allowed
+        self.client.request("read", room=r, member="hub", kind="agent")
+        self.post(r, "hub", "@arx looks good")  # suppressed by the cooldown, and the room goes quiet
+        ev = self.quiet_events(w)
+        self.assertIsNotNone(ev)
+        self.assertIn("cooldown", ev["text"])
+
+    # -- agents that forget the @ ------------------------------------------
+
+    def test_10j_an_agent_post_that_addresses_nobody_is_told_so(self):
+        r = self.room("g10j", agents=("arx", "hub"))
+        quiet = self.post(r, "arx", "mig-45: could you review this?")  # a name and a colon is not a mention
+        self.assertEqual(quiet["wake"]["woke"], [])
+        self.assertTrue(any("nobody was addressed" in n and "@their-name" in n for n in quiet["notices"]), quiet["notices"])
+        self.assertEqual(self.post(r, "arx", "@hub could you review this?")["notices"], [])  # addressed: nothing to say
+        self.assertEqual(self.post(r, "arx", "all done here", no_reply_needed=True)["notices"], [])  # fyi: nothing to say
+        self.assertEqual(self.post(r, "kit", "just a thought", kind="human")["notices"], [])  # people are not told
+        alone = self.room("g10k", agents=("arx",))
+        self.assertEqual(self.post(alone, "arx", "talking to myself")["notices"], [])  # nobody else to address
+
+    def test_10l_what_every_agent_is_told_says_how_to_hand_work_on(self):
+        from acm import mcp_server
+
+        self.assertIn("write @their-name in your post", mcp_server.INSTRUCTIONS)
+        self.assertIn("'name:' does not", mcp_server.INSTRUCTIONS)
 
     # -- cost preview ------------------------------------------------------
 

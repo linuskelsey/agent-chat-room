@@ -27,6 +27,11 @@ WATCH_QUEUE_MAX = 1000  # events a watcher may fall behind by before it is disco
 PENDING_TTL = 120.0  # a woken agent that has not read yet is not woken again for this long
 TICK_SECS = float(os.environ.get("ACM_TICK_SECS", "30"))
 ACCOUNT_POLL_SECS = float(os.environ.get("ACM_ACCOUNT_POLL_SECS", "2"))
+ATTENTION_SECS = float(os.environ.get("ACM_ATTENTION_SECS", "3"))  # blocked this long before the human is told
+ATTENTION_POLL_SECS = float(os.environ.get("ACM_ATTENTION_POLL_SECS", "1"))
+QUIET_SECS = float(os.environ.get("ACM_QUIET_SECS", "4"))  # how long after an unanswered post before the room is judged quiet
+QUIET_POLL_SECS = float(os.environ.get("ACM_QUIET_POLL_SECS", "2"))
+QUIET_MAX_SECS = 180.0
 ACCOUNT_MAX_SECS = 900.0  # stop waiting for a woken session to go idle after this long
 CACHE_TTL_SECS = 300  # an agent idle for longer than this has probably lost its prompt cache
 
@@ -137,6 +142,7 @@ class Daemon:
         self.agent_turns: dict[str, int] = {}  # room -> agent-to-agent wakes since the last human message
         self.warned: set[tuple[str, str]] = set()  # (room, cap) already warned about
         self.spans: dict[str, dict] = {}  # agent -> the token-accounting span currently open for it
+        self.blocked: dict[str, set[str]] = {}  # agent -> rooms where the human has been told it is waiting on them
         store.on_system = lambda room, msg: self._publish(room, {"event": "message", "message": msg})
 
     def _publish(self, room: str, event: dict) -> None:
@@ -196,6 +202,8 @@ class Daemon:
         """
         self.pending[(room, name)] = time.monotonic()
         self._spawn(self._confirm(room, name, sent_at, self.store.cursor_of(room, name)))
+        if state is not None:
+            self._spawn(self._attend(room, name, sent_at))
         if state is None:
             return
         path = accounting.find_transcript(state.get("session_id"))
@@ -359,8 +367,16 @@ class Daemon:
         wake_result = await self.notify(msg, lim, is_agent)
         if is_agent and wake_result["woke"]:
             self.agent_turns[room] = self.agent_turns.get(room, 0) + 1
+        if (is_agent and lim["notify_when_quiet"] and not wake_result["woke"] and not wake_result["already_pending"]
+                and not wake_result["notified"]):
+            self._spawn(self._quiet(room, msg["id"], wake_result["suppressed"]))  # nothing else is going to happen: say so
         if wake_result["suppressed"]:
             notices.append("nobody was woken: " + wake_result["suppressed"])
+        elif is_agent and not msg["mentions"] and not msg["no_reply_needed"] and self._others(room, author):
+            notices.append(
+                "nobody was addressed, so nobody was woken. To hand this on, write @their-name in the post "
+                "(a name followed by a colon does not count). If nothing is needed from anyone, mark it no_reply_needed."
+            )
         self.enforce(room)
         return {"message": msg, "wake": wake_result, "notices": notices}
 
@@ -425,6 +441,10 @@ class Daemon:
             self._spawn(wake.notify_desktop(f"acm: {room}", f"{author}: {msg['body']}"))
         return out
 
+    def _others(self, room: str, author: str) -> bool:
+        """Whether the room has another agent that could have been addressed."""
+        return any(m["kind"] == "agent" and n != author for n, m in self.store.members(room).items())
+
     def _estimate(self, name: str, state: dict) -> dict:
         """What waking this agent now should cost: its usual warm figure, or its cold one if its cache has likely expired."""
         cost = self.store.wake_cost(name)
@@ -462,6 +482,74 @@ class Daemon:
             "agent_turns": self.agent_turns.get(room, 0),
             "snoozed": self.store.snoozed(),
         }
+
+    async def _attend(self, room: str, name: str, sent_at: float) -> None:
+        """Tell the human when a woken agent is stuck waiting for them in its own window.
+
+        An approval prompt or a question in an agent's own Claude Code window stops it dead, and nothing in
+        the room shows that. The session record's status says `waiting` while that is so.
+        """
+        deadline = time.monotonic() + ACCOUNT_MAX_SECS
+        waiting_since: float | None = None
+        told = False
+        try:
+            while time.monotonic() < deadline:
+                await asyncio.sleep(ATTENTION_POLL_SECS)
+                state = wake.session_state(self.store, name)
+                if state is None:
+                    break
+                if state["status"] == "waiting":
+                    waiting_since = waiting_since or time.monotonic()
+                    if not told and time.monotonic() - waiting_since >= ATTENTION_SECS:
+                        told = True
+                        self._blocked(room, name, True)
+                    continue
+                waiting_since = None
+                if told:
+                    told = False
+                    self._blocked(room, name, False)
+                if state["status"] == "idle" and state["status_at"] / 1000 >= sent_at:
+                    break
+        finally:
+            if told:
+                self._blocked(room, name, False)
+
+    def _anyone_working(self, room: str) -> bool:
+        for name, member in self.store.members(room).items():
+            if member["kind"] == "agent":
+                state = wake.session_state(self.store, name)
+                if state is not None and state["status"] in ("busy", "waiting"):
+                    return True
+        return False
+
+    async def _quiet(self, room: str, post_id: int, why: str | None) -> None:
+        """After an agent's post that woke nobody: once every agent has stopped and nobody has spoken since,
+        tell the human it is their turn. Only runs when the room's notify_when_quiet is on."""
+        await asyncio.sleep(QUIET_SECS)
+        deadline = time.monotonic() + QUIET_MAX_SECS
+        while time.monotonic() < deadline:
+            try:
+                if self.store.get_room(room)["status"] != "open" or self.store.last_message_id(room) != post_id:
+                    return  # someone has spoken since, or the room is over: it is not quiet
+            except AcmError:
+                return
+            if not self._anyone_working(room):
+                break
+            await asyncio.sleep(QUIET_POLL_SECS)
+        else:
+            return
+        text = f"{room} is quiet: nobody is working and nobody was woken, so it is your turn" + (f" ({why})" if why else "")
+        self._publish(room, {"event": "quiet", "text": text})
+        await wake.notify_desktop(f"acm: {room}", text)
+
+    def _blocked(self, room: str, name: str, waiting: bool) -> None:
+        text = f"{name} is waiting for you in its own Claude Code window (an approval or a question)"
+        first = not self.blocked.get(name)
+        rooms = self.blocked.setdefault(name, set())
+        (rooms.add if waiting else rooms.discard)(room)
+        self._publish(room, {"event": "attention", "agent": name, "waiting": waiting, "text": text if waiting else f"{name} is no longer waiting"})
+        if waiting and first:  # one notification per agent, however many rooms it is waiting in
+            self._spawn(wake.notify_desktop(f"acm: {room}", text))
 
     async def _account(self, span: dict) -> None:
         """Count the tokens a woken session spends, from the wake until it is idle again or woken for another room."""

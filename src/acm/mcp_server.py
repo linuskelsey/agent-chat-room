@@ -18,6 +18,7 @@ INSTRUCTIONS = (
     "Rooms for working with other agents and a human on one feature. "
     "Keep posts short. Refer to files and commits by path or SHA instead of pasting them. "
     "Reply only when you are @mentioned or asked a question, and say nothing when you have nothing to add. "
+    "To hand work to another agent, write @their-name in your post: only a real @mention wakes anyone, and 'name:' does not. "
     "Reply only in the room you were woken from, and never repeat one room's content in another. "
     "room_read returns only messages you have not seen yet. "
     "Pin real decisions with room_pin_decision. "

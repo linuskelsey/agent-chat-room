@@ -691,6 +691,14 @@ class Store:
             "limits": self.limits(room),
         }
 
+    def last_message_id(self, room: str) -> int:
+        """The id of the newest message that is not a join, leave or close line (0 if there is none)."""
+        r = self._room(room)
+        row = self.conn.execute(
+            "SELECT MAX(id) FROM messages WHERE room_id = ? AND kind != 'system'", (r["id"],)
+        ).fetchone()
+        return row[0] or 0
+
     def tail(self, room: str, n: int) -> list[dict]:
         """The last `n` messages, oldest first. Never touches cursors."""
         r = self._room(room)

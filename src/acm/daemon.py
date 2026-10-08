@@ -18,11 +18,12 @@ import traceback
 from collections import deque
 from pathlib import Path
 
-from acm import accounting, config, identity, paths, summary, usagelimits, wake
+from acm import accounting, config, fsutil, identity, paths, summary, usagelimits, wake
 from acm.db import Store, parse_mentions
 from acm.errors import AcmError
 
 LINE_LIMIT = 8 * 1024 * 1024
+WATCH_QUEUE_MAX = 1000  # events a watcher may fall behind by before it is disconnected
 PENDING_TTL = 120.0  # a woken agent that has not read yet is not woken again for this long
 TICK_SECS = float(os.environ.get("ACM_TICK_SECS", "30"))
 ACCOUNT_POLL_SECS = float(os.environ.get("ACM_ACCOUNT_POLL_SECS", "2"))
@@ -45,21 +46,28 @@ SESSION_ENV_MARKERS = {
 REQUIRE_TTY = os.environ.get("ACM_ALLOW_NO_TTY") != "1"
 
 
-def peer_pid(writer: asyncio.StreamWriter) -> int | None:
+def peer_credentials(writer: asyncio.StreamWriter) -> tuple[int, int] | None:
+    """(pid, uid) of the process on the other end of the connection, as the kernel reports them."""
     sock = writer.get_extra_info("socket")
     try:
-        pid, _, _ = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
-        return pid
+        pid, uid, _ = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+        return pid, uid
     except (OSError, AttributeError, struct.error):
         return None
 
 
+def peer_pid(writer: asyncio.StreamWriter) -> int | None:
+    creds = peer_credentials(writer)
+    return creds[0] if creds else None
+
+
 def describe_peer(pid: int | None) -> dict:
     """Facts about the process on the other end of a connection."""
-    info = {"in_session": False, "marked": False, "tty": False}
+    info = {"in_session": False, "marked": False, "tty": False, "session": None}
     if pid is None:
         return info
-    info["in_session"] = identity.find_session(pid, max_depth=32) is not None
+    info["session"] = identity.find_session(pid, max_depth=32)
+    info["in_session"] = info["session"] is not None
     try:
         keys = {e.split(b"=", 1)[0].decode(errors="replace") for e in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")}
         info["marked"] = bool(keys & SESSION_ENV_MARKERS)
@@ -90,6 +98,24 @@ def guard(req: dict, peer: dict) -> None:
         )
 
 
+# Which request field names the member a request acts as.
+ACTS_AS = {"register": "name", "post": "author", "join": "member", "leave": "member", "catch_up": "member", "read": "member"}
+
+
+# Operations that look at one room, and the request field that names it.
+ROOM_FIELD = {"get_room": "name", "tail": "room", "read": "room", "members": "room", "summary": "room",
+              "export": "room", "budget": "room", "wake_preview": "room", "watch": "room"}
+
+
+def session_name(session: dict) -> str:
+    """The name an agent in this Claude session goes by: its session name, or agent-<pid> if it has none."""
+    return identity.sanitize(str(session.get("name") or "")) or f"agent-{session['pid']}"
+
+
+def _alive(pid: int) -> bool:
+    return Path(f"/proc/{pid}").exists()
+
+
 def _need(req: dict, key: str):
     if key not in req:
         raise AcmError("bad_request", f"missing field: {key}")
@@ -101,6 +127,8 @@ class Daemon:
         self.store = store
         self.watchers: dict[str, set[asyncio.Queue]] = {}
         self.global_watchers: set[asyncio.Queue] = set()  # every room's events, for clients that show all rooms
+        self.watch_writers: dict[asyncio.Queue, asyncio.StreamWriter] = {}
+        self.global_names: dict[asyncio.Queue, set[str] | None] = {}  # who each all-rooms watcher is, for what it may see
         self.writers: set[asyncio.StreamWriter] = set()
         self.pending: dict[tuple[str, str], float] = {}  # (room, agent) -> when the outstanding wake was sent
         self.tasks: set[asyncio.Task] = set()
@@ -113,10 +141,16 @@ class Daemon:
 
     def _publish(self, room: str, event: dict) -> None:
         event = {**event, "room_name": room}
-        for q in self.watchers.get(room, ()):
-            q.put_nowait(event)
-        for q in self.global_watchers:
-            q.put_nowait(event)
+        recipients = [*self.watchers.get(room, ()), *(
+            q for q in self.global_watchers if self.can_see(room, self.global_names.get(q))
+        )]
+        for q in recipients:
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:  # it has stopped reading: cut it off rather than keep its backlog in memory
+                writer = self.watch_writers.get(q)
+                if writer is not None:
+                    writer.transport.abort()
 
     def _spawn(self, coro) -> None:
         task = asyncio.ensure_future(coro)
@@ -173,6 +207,78 @@ class Daemon:
         self.spans[name] = span
         self._spawn(self._account(span))
 
+    def check_identity(self, req: dict, peer: dict) -> None:
+        """An agent speaks only as itself.
+
+        A caller inside a Claude session may act only under its session's own name (or a name it held
+        earlier, before a rename), may register only its own session, and cannot take a name that a live
+        session already holds. A caller that carries a session's environment but cannot be tied to a
+        session may not act as an agent at all. Callers outside any session are not checked here.
+        """
+        if not (peer["in_session"] or peer["marked"]):
+            return
+        op = req.get("op")
+        field = ACTS_AS.get(op)
+        if field is None or field not in req:
+            return
+        if op == "read" and (req.get("peek") or req.get("since") is not None):
+            return  # looking without moving anyone's read position is not acting as them
+        session, claimed = peer["session"], req[field]
+        if session is None:
+            raise AcmError("identity", "this process looks like an agent's but cannot be tied to a session, so it may not act as one")
+        own = session_name(session)
+        earlier = {a["name"] for a in self.store.agents_of(session["pid"])}
+        if claimed != own and claimed not in earlier:
+            raise AcmError("identity", f"this session is {own}; it cannot act as {claimed}")
+        if op == "register":
+            if req.get("pid") != session["pid"] or req.get("inbox") != session.get("messagingSocketPath"):
+                raise AcmError("identity", "a session can only register itself")
+            held = self.store.get_agent(claimed)
+            if held and held["pid"] != session["pid"] and _alive(held["pid"]):
+                raise AcmError("identity", f"{claimed} is already held by another live session")
+
+    def agent_names(self, peer: dict) -> set[str] | None:
+        """The names an agent caller may act as, or None for a caller that is not an agent (humans, harnesses).
+
+        An agent is whatever runs under a Claude session or carries one's environment. A marked process that
+        cannot be tied to a session has no names at all.
+        """
+        if not (peer["in_session"] or peer["marked"]):
+            return None
+        session = peer["session"]
+        if session is None:
+            return set()
+        return {session_name(session)} | {a["name"] for a in self.store.agents_of(session["pid"])}
+
+    def can_see(self, room: str, names: set[str] | None) -> bool:
+        """Whether an agent known by `names` may see `room`: always for humans, and for agents when the room is
+        open to anyone or one of the names is a member."""
+        if names is None:
+            return True
+        try:
+            if self.store.limits(room)["join_policy"] == "anyone":
+                return True
+            members = self.store.members(room)
+        except AcmError:
+            return False
+        return any(n in members for n in names)
+
+    def check_invited(self, room: str, req: dict) -> None:
+        """Joining, posting or catching up: an agent that was not added is told how to get added."""
+        names = req.get("_names")
+        if names is not None and not self.can_see(room, names):
+            who = sorted(names)[0] if names else "this agent"
+            raise AcmError("not_invited", f"{room} only takes agents a human has added; ask them to add {who}")
+
+    def check_visible(self, req: dict) -> None:
+        """Reading about a room an agent cannot see gets the same answer as a room that does not exist."""
+        names = req.get("_names")
+        field = ROOM_FIELD.get(req.get("op"))
+        if names is None or field is None or field not in req:
+            return
+        if not self.can_see(req[field], names):
+            raise AcmError("not_found", f"no such room: {req[field]}")
+
     async def dispatch_async(self, req: dict) -> dict:
         op = req.get("op")
         if op == "invite":
@@ -222,6 +328,8 @@ class Daemon:
         from_kind, s = req.get("from", "human"), self.store
         lim = s.limits(room)
         is_agent = from_kind == "agent"
+        if is_agent:
+            self.check_invited(room, req)
         if is_agent:
             if isinstance(body, str) and len(body) > lim["ceiling_chars"]:
                 raise AcmError("too_long", f"post is {len(body)} characters, above the limit of {lim['ceiling_chars']}")
@@ -473,11 +581,8 @@ class Daemon:
         self._publish(name, {"event": "closed", "room": room})
         exported = None
         try:
-            path = self._export_path(name)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(summary.render(data, title=True) + "\n\n" + summary.transcript(s, name) + "\n")
-            tmp.replace(path)
+            path = fsutil.unclaimed_path(self._export_path(name), marker=f"<!-- acm-room: {name} -->")
+            fsutil.atomic_write(path, f"<!-- acm-room: {name} -->\n" + summary.render(data, title=True) + "\n\n" + summary.transcript(s, name) + "\n")
             exported = str(path)
         except OSError as e:
             print(f"[{name}] could not save the summary: {e}", file=sys.stderr, flush=True)
@@ -508,7 +613,8 @@ class Daemon:
         if op == "get_room":
             return {"room": s.get_room(_need(req, "name"))}
         if op == "list_rooms":
-            return {"rooms": s.list_rooms(req.get("status"), req.get("member"))}
+            rooms = s.list_rooms(req.get("status"), req.get("member"))
+            return {"rooms": [r for r in rooms if self.can_see(r["name"], req.get("_names"))]}
         if op in ("close_room", "kill_room"):
             return self._close(op, req)
         if op == "summary":
@@ -522,15 +628,17 @@ class Daemon:
                 text += "\n\n" + summary.transcript(s, room)
             return {"text": text + "\n"}
         if op == "search":
-            return {"matches": s.search(
+            found = s.search(
                 _need(req, "query"), req.get("room"), req.get("author"), req.get("status"),
                 int(req.get("limit", 50)), bool(req.get("include_system", False)),
-            )}
+            )
+            return {"matches": [m for m in found if self.can_see(m["room"], req.get("_names"))]}
         if op == "link":
             room = s.set_project_dir(_need(req, "room"), self._project_dir(req.get("dir")))
             self._publish(room["name"], {"event": "room_updated", "what": "link"})
             return {"room": room}
         if op == "join":
+            self.check_invited(_need(req, "room"), req)
             return {"member": s.join(_need(req, "room"), _need(req, "member"), self._kind(req))}
         if op == "leave":
             s.leave(_need(req, "room"), _need(req, "member"))
@@ -567,6 +675,7 @@ class Daemon:
                 kind=self._kind(req),
             )
         if op == "catch_up":
+            self.check_invited(_need(req, "room"), req)
             self.pending.pop((req.get("room"), req.get("member")), None)
             return s.catch_up(
                 _need(req, "room"), _need(req, "member"), int(req.get("keep", 10)), req.get("kind", "agent")
@@ -582,7 +691,10 @@ class Daemon:
     async def _watch(self, req: dict, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         everywhere = req.get("op") == "watch_all"
         room = "*" if everywhere else self.store.get_room(_need(req, "room"))["name"]
-        q: asyncio.Queue = asyncio.Queue()
+        q: asyncio.Queue = asyncio.Queue(WATCH_QUEUE_MAX)
+        self.watch_writers[q] = writer
+        if everywhere:
+            self.global_names[q] = req.get("_names")
         (self.global_watchers if everywhere else self.watchers.setdefault(room, set())).add(q)
         eof = asyncio.ensure_future(reader.read(1))
         try:
@@ -598,20 +710,38 @@ class Daemon:
             return  # the watcher went away
         finally:
             eof.cancel()
+            self.watch_writers.pop(q, None)
+            self.global_names.pop(q, None)
             (self.global_watchers if everywhere else self.watchers[room]).discard(q)
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        creds = peer_credentials(writer)
+        if creds is None or creds[1] != os.getuid():  # the socket is owner-only already; this checks it anyway
+            writer.close()
+            return
         self.writers.add(writer)
-        peer = describe_peer(peer_pid(writer))
+        peer = describe_peer(creds[0])
         try:
-            while line := await reader.readline():
+            while True:
+                try:
+                    line = await reader.readline()
+                except (asyncio.LimitOverrunError, ValueError):
+                    await self._send(writer, {"ok": False, "error": {"code": "too_large", "message": "request too large"}})
+                    return
+                if not line:
+                    return
                 try:
                     req = json.loads(line)
                     if not isinstance(req, dict):
                         raise AcmError("bad_request", "request must be a JSON object")
                     guard(req, peer)
-                    if peer["in_session"] or peer["marked"]:
-                        req["_agentish"] = True
+                    self.check_identity(req, peer)
+                    names = self.agent_names(peer)
+                    req.pop("_names", None)
+                    req.pop("_agentish", None)
+                    if names is not None:  # a caller cannot claim to be something else by sending these itself
+                        req["_names"], req["_agentish"] = names, True
+                    self.check_visible(req)
                     if req.get("op") in ("watch", "watch_all"):
                         await self._watch(req, reader, writer)
                         return
@@ -643,8 +773,7 @@ def _socket_alive(path: Path) -> bool:
 
 
 async def serve(store: Store, sock: Path) -> None:
-    sock.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    os.chmod(sock.parent, 0o700)
+    fsutil.ensure_private_dir(sock.parent)
     # A held lock means a live daemon; it also keeps two racing starters from unlinking each other's socket.
     lock = open(sock.with_suffix(".lock"), "w")
     try:
@@ -675,6 +804,7 @@ async def serve(store: Store, sock: Path) -> None:
 
 
 def main() -> int:
+    os.umask(0o077)  # everything the daemon creates (database, exports) is private to this user
     store = Store(paths.db_path())
     try:
         asyncio.run(serve(store, paths.socket_path()))

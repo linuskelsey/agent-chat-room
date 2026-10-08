@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from acm import accounting, config, identity, paths
+from acm import accounting, config, fsutil, identity, paths
 
 WINDOWS = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
 SHARE_CACHE_SECS = 60
@@ -35,11 +35,7 @@ def write_from_statusline(raw: str) -> bool:
             out[key] = {"used_percentage": float(w["used_percentage"]), "resets_at": float(w["resets_at"])}
     if len(out) == 1:
         return False
-    path = limits_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(out))
-    os.replace(tmp, path)
+    fsutil.atomic_write(limits_file(), json.dumps(out))
     return True
 
 
@@ -122,39 +118,48 @@ def valve_reason(limits: dict) -> str | None:
 _share_cache: dict = {}
 
 
-def _all_sessions_weighted(since: float) -> float:
-    """Weighted tokens of every Claude Code session's turns since `since` (epoch), from the transcripts."""
-    total = 0.0
-    seen: dict = {}
-    root = identity.claude_dir() / "projects"
+def _turns_since(since: float) -> dict:
+    """Every assistant turn of every Claude Code session after `since` (epoch), keyed by (message id, request id).
+
+    Transcripts can be large, so each is read one line at a time. A streamed turn is written as several
+    lines that repeat one usage block; the one with the most output tokens is kept.
+    """
+    turns: dict = {}
     cutoff = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(since))
-    for path in root.glob("*/*.jsonl"):
+    for path in (identity.claude_dir() / "projects").glob("*/*.jsonl"):
         try:
             if path.stat().st_mtime < since:
                 continue
-            lines = path.read_bytes().split(b"\n")
+            handle = open(path, "rb")
         except OSError:
             continue
-        for line in lines:
-            if b'"usage"' not in line:
-                continue
-            try:
-                e = json.loads(line)
-            except ValueError:
-                continue
-            m = e.get("message") if isinstance(e, dict) else None
-            u = m.get("usage") if isinstance(m, dict) else None
-            if e.get("type") != "assistant" or not isinstance(u, dict) or str(e.get("timestamp", "")) < cutoff:
-                continue
-            key = (m.get("id"), e.get("requestId"))
-            if key not in seen or u.get("output_tokens", 0) >= seen[key].get("output_tokens", 0):
-                seen[key] = u
-    for u in seen.values():
-        total += config.weighted_tokens(
+        with handle:
+            for line in handle:
+                if b'"usage"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                message = entry.get("message") if isinstance(entry, dict) else None
+                usage = message.get("usage") if isinstance(message, dict) else None
+                if entry.get("type") != "assistant" or not isinstance(usage, dict) or str(entry.get("timestamp", "")) < cutoff:
+                    continue
+                key = (message.get("id"), entry.get("requestId"))
+                if key not in turns or usage.get("output_tokens", 0) >= turns[key].get("output_tokens", 0):
+                    turns[key] = usage
+    return turns
+
+
+def _all_sessions_weighted(since: float) -> float:
+    """Weighted tokens of every Claude Code session's turns since `since` (epoch), from the transcripts."""
+    return sum(
+        config.weighted_tokens(
             int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0),
             int(u.get("cache_creation_input_tokens") or 0), int(u.get("cache_read_input_tokens") or 0),
         )
-    return total
+        for u in _turns_since(since).values()
+    )
 
 
 def room_share_pct(room_weighted_in_window: float) -> float | None:

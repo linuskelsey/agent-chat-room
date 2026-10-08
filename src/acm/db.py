@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from acm import config
+from acm import config, fsutil, textsafe
 from acm.errors import AcmError
 
 ROOM_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -121,7 +121,7 @@ def _message(row: sqlite3.Row, room: str) -> dict:
 class Store:
     def __init__(self, path: str | Path):
         if str(path) != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            fsutil.ensure_private_dir(Path(path).parent)
         self.on_system = None  # called with (room name, message) for each system line, so the daemon can push it live
         self.conn = sqlite3.connect(str(path), isolation_level=None, timeout=10)
         self.conn.row_factory = sqlite3.Row
@@ -170,6 +170,7 @@ class Store:
         if not isinstance(name, str) or not ROOM_RE.match(name):
             raise AcmError("bad_name", "room name must be lowercase letters, digits, '.', '_' or '-' (max 64)")
         self._check_member_name(creator)
+        topic = textsafe.one_line(topic) if isinstance(topic, str) else ""
         now = time.time()
         with self._tx():
             if self.conn.execute("SELECT 1 FROM rooms WHERE name = ?", (name,)).fetchone():
@@ -494,6 +495,10 @@ class Store:
         self.conn.execute("DELETE FROM snooze WHERE until <= ?", (now,))
         return {r["name"]: r["until"] for r in self.conn.execute("SELECT name, until FROM snooze")}
 
+    def agents_of(self, pid: int) -> list[dict]:
+        """Every name registered to this session pid (more than one after a rename)."""
+        return [dict(r) for r in self.conn.execute("SELECT name, pid, inbox FROM agents WHERE pid = ?", (pid,))]
+
     def get_agent(self, name: str) -> dict | None:
         row = self.conn.execute("SELECT name, pid, inbox FROM agents WHERE name = ?", (name,)).fetchone()
         return dict(row) if row else None
@@ -578,8 +583,10 @@ class Store:
             raise AcmError("forbidden", "only humans can post approvals")
         if not isinstance(body, str) or not body.strip():
             raise AcmError("bad_request", "message body is empty")
+        body = textsafe.clean(body)
         if refs is not None and not (isinstance(refs, list) and all(isinstance(x, str) for x in refs)):
             raise AcmError("bad_request", "refs must be a list of strings")
+        refs = [textsafe.one_line(x) for x in refs] if refs else refs
         with self._tx():
             r = self._open_room(room)
             member = self._ensure_member(r, author, from_kind)

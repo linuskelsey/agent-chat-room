@@ -4,6 +4,7 @@ import os
 import tomllib
 from pathlib import Path
 
+from acm import fsutil
 from acm.errors import AcmError
 
 STYLES = {"terse": 400, "normal": 1200}  # soft post length target in characters
@@ -21,6 +22,7 @@ SPEC = {
     "confirm_wake_tokens": (int, 100000, "the room client asks before sending a message that would wake agents costing about this many tokens (0 = never ask)"),
     "inline_human": (int, 1, "put a human's message text in the wake sent to a mentioned agent, saving it a read (0 = pointer only)"),
     "export_dir": (str, None, "directory where a closed room's summary is written as <room>.md (default: acm's data dir, rooms/)"),
+    "join_policy": (str, "invited", "which agents can see and use a room: invited (only agents a human added; others cannot even see it) or anyone (any agent, by name)"),
     "warn_fraction": (float, 0.8, "warn the human when a cap reaches this fraction"),
     "pause_session_pct": (float, None, "stop waking agents while the 5-hour usage limit is at or above this percent"),
     "pause_week_pct": (float, None, "stop waking agents while the 7-day usage limit is at or above this percent"),
@@ -55,6 +57,8 @@ def coerce(key: str, value):
         raise AcmError("bad_request", f"{key} cannot be negative")
     if key == "style" and value not in STYLES:
         raise AcmError("bad_request", f"style must be one of: {', '.join(STYLES)}")
+    if key == "join_policy" and value not in ("anyone", "invited"):
+        raise AcmError("bad_request", "join_policy must be anyone or invited")
     return value
 
 
@@ -122,10 +126,7 @@ def write_example(force: bool = False) -> Path | None:
     path = config_path()
     if path.exists() and not force:
         return None
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(example_text())
-    tmp.replace(path)
+    fsutil.atomic_write(path, example_text(), mode=0o644)  # holds nothing secret
     return path
 
 

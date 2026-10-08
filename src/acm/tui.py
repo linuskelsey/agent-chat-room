@@ -10,7 +10,7 @@ import threading
 import time
 import unicodedata
 
-from acm import client, fmt
+from acm import client, fmt, textsafe
 from acm.errors import AcmError
 from acm.tui_model import Model, Room
 
@@ -293,10 +293,11 @@ class View:
         for msg in room.messages:
             stamp = fmt.clock(msg["ts"])
             if msg["kind"] == "system":
-                first, *rest = msg["body"].split("\n")
+                first, *rest = textsafe.clean(msg["body"]).split("\n")
                 out.append([(f"{stamp} ", "dim"), (clip(f"* {first}", width - 6), "system")])
                 continue
             who = "you" if msg["author"] == self.model.me else msg["author"]
+            msg = {**msg, "body": textsafe.clean(msg["body"]), "refs": [textsafe.one_line(r) for r in msg["refs"]]}
             tags = (" (human)" if msg["from"] == "human" and msg["author"] != self.model.me else "")
             tags += " ✎fyi" if msg["no_reply_needed"] else ""
             prefix = f"{stamp} {who}{tags}: "
@@ -321,7 +322,7 @@ class View:
             return
         members = f"{room.member_count} members" if room.members is None else f"{len(room.members)} members"
         right = f"{members}{' · closed' if not room.open else ''}"
-        head = f" {room.name}" + (f" · {room.topic}" if room.topic else "")
+        head = f" {room.name}" + (f" · {textsafe.one_line(room.topic)}" if room.topic else "")
         focused = self.focus == "input"
         canvas.fill(0, x0, width, "reverse" if focused else "title")
         canvas.put(0, x0, clip(head, width - len(right) - 2), "reverse" if focused else "title")

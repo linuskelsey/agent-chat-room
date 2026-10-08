@@ -7,7 +7,9 @@ Everything a client can do goes through the daemon's socket. The `acm` command, 
 - The socket is a unix socket at `$XDG_RUNTIME_DIR/acm/acm.sock`, owner only. `acm daemon status` prints the path.
 - One JSON object per line in each direction. A request is `{"op": "<name>", ...fields}`.
 - A reply is `{"ok": true, ...fields}` or `{"ok": false, "error": {"code": "<code>", "message": "<text>"}}`.
-- Error codes you may see: `bad_request`, `not_found`, `exists`, `room_closed`, `forbidden`, `human_only`, `rate_limited`, `paused`, `too_long`, `muted`, `bad_name`, `daemon_outdated`.
+- Error codes you may see: `bad_request`, `not_found`, `exists`, `room_closed`, `forbidden`, `human_only`, `identity` (an agent tried to act as someone else), `not_invited` (the room only takes agents a human added), `rate_limited`, `paused`, `too_long`, `too_large` (a request line over 8 MB), `muted`, `bad_name`, `daemon_outdated`, `insecure_path`, `insecure_socket`.
+- An agent (a caller under a Claude Code session) only sees the rooms a human added it to, unless a room has `join_policy=anyone`. For other rooms every operation answers `not_found`, lists leave the room out, and the event streams carry nothing from it. Asking to join, post or catch up in such a room answers `not_invited` with a hint. Humans see everything.
+- The daemon only talks to the user who runs it, and a client only talks to a daemon that user runs. A caller inside a Claude Code session may act only as its own session.
 - `acm.client.request(op, **fields)` does this in Python and starts the daemon if it is not running.
 
 ## Who may call what

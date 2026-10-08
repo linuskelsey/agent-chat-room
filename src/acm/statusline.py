@@ -7,12 +7,13 @@ restores it exactly.
 """
 
 import json
+import os
 import shlex
 import shutil
 import sys
 from pathlib import Path
 
-from acm import config, identity
+from acm import config, fsutil, identity
 from acm.errors import AcmError
 
 BACKUP_SUFFIX = ".acm-backup"
@@ -43,11 +44,7 @@ def _load() -> dict:
 
 
 def _save(data: dict) -> None:
-    path = settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".acm-tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n")
-    tmp.replace(path)
+    fsutil.atomic_write(settings_path(), json.dumps(data, indent=2) + "\n", mode=0o644)
 
 
 def wrapped_command(original: str | None) -> str:
@@ -88,10 +85,13 @@ def install() -> Path:
     data = _load()
     path = settings_path()
     backup = path.with_name(path.name + BACKUP_SUFFIX)
-    if path.exists() and not backup.exists():
-        shutil.copy2(path, backup)
-    state_path().parent.mkdir(parents=True, exist_ok=True)
-    state_path().write_text(json.dumps({"original": current, "installed": new["command"]}, indent=2) + "\n")
+    if os.path.lexists(backup) and (backup.is_symlink() or not backup.is_file()):
+        raise AcmError("insecure_path", f"{backup} is not a plain file; remove it first (acm will not write through it)")
+    if path.exists() and not os.path.lexists(backup):  # an earlier backup is kept: it holds the original
+        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as out:
+            out.write(path.read_bytes())
+    fsutil.atomic_write(state_path(), json.dumps({"original": current, "installed": new["command"]}, indent=2) + "\n")
     data["statusLine"] = new
     _save(data)
     return backup

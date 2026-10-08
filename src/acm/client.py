@@ -1,22 +1,31 @@
 """Client for the acm daemon socket, including daemon auto-start."""
 
 import json
+import os
 import socket
+import struct
 import subprocess
 import sys
 import time
 
-from acm import paths
+from acm import fsutil, paths
 from acm.errors import AcmError
 
 START_TIMEOUT = 5.0
+
+
+class InsecureSocket(AcmError):
+    """Something other than this user's daemon is listening on the socket path."""
 
 
 def _connect() -> socket.socket:
     s = socket.socket(socket.AF_UNIX)
     try:
         s.connect(str(paths.socket_path()))
-    except OSError:
+        _pid, uid, _gid = struct.unpack("3i", s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+        if uid != os.getuid():  # not our daemon: send it nothing
+            raise InsecureSocket("insecure_socket", f"the socket {paths.socket_path()} is owned by another user; refusing to use it")
+    except BaseException:
         s.close()
         raise
     return s
@@ -24,8 +33,9 @@ def _connect() -> socket.socket:
 
 def start_daemon() -> None:
     """Spawn the daemon detached from this process and wait until it accepts connections."""
-    paths.data_dir().mkdir(parents=True, exist_ok=True)
-    with open(paths.log_path(), "ab") as log:
+    fsutil.ensure_private_dir(paths.runtime_dir())  # fail clearly now, not after the daemon has failed to start
+    fsutil.ensure_private_dir(paths.data_dir())
+    with os.fdopen(os.open(paths.log_path(), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600), "ab") as log:
         subprocess.Popen(
             [sys.executable, "-m", "acm.daemon"],
             stdin=subprocess.DEVNULL,

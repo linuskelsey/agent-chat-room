@@ -56,7 +56,7 @@ Type these in the message box. Anything else is sent to the room.
 | `/close` | close the conversation after asking, then show its summary |
 | `/members` | who is in it, with muted, invited and strike markers and what waking each agent usually costs |
 | `/mute NAME`, `/unmute NAME` | stop or allow a member posting |
-| `/add NAME...` | bring agents in by session name; each is woken to join |
+| `/add NAME...` | bring agents in by session name; each is woken to join. A new conversation is invisible to agents until you do this |
 | `/wrapup AGENT` | ask exactly one agent to pin a summary decision |
 | `/fyi TEXT` | send without waking anyone |
 | `/decision TEXT` | send and pin |

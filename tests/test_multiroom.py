@@ -155,6 +155,7 @@ class RenameTest(unittest.TestCase):
 
     def test_renaming_a_session_mid_room_gives_it_a_new_member_that_can_still_be_woken(self):
         self.client.request("create_room", name="rn", by="kit")
+        self.client.request("set_limits", room="rn", updates={"join_policy": "anyone"})  # this test is about renaming
         # the "session": a wrapper process that the MCP server is a child of, with a session record and an inbox
         wrapper = subprocess.Popen(
             [sys.executable, "-c", "import subprocess,sys;sys.exit(subprocess.run([sys.executable,'-m','acm.mcp_server']).returncode)"],

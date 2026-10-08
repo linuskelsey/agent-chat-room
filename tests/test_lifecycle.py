@@ -99,7 +99,7 @@ class LifecycleTest(unittest.TestCase):
         self.assertIn(f"saved to {saved}", text)
         with open(saved) as f:
             body = f.read()
-        self.assertTrue(body.startswith("# Room: l1"))
+        self.assertTrue(body.startswith("<!-- acm-room: l1 -->\n# Room: l1"))  # marked as acm's, so it is never mistaken for a foreign file
         self.assertIn("## Transcript", body)  # the saved file has the whole conversation, not only the summary
         self.assertIn("**kit (human)**: @arx please review src/db.py [refs: src/db.py]", body)
         self.assertIn("**arx** **DECISION**: use sqlite for storage", body)

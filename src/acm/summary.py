@@ -1,30 +1,49 @@
 """A closed room's summary, assembled from what is in the log. No model call, so it costs nothing."""
 
+import os
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 
+from acm import textsafe
 from acm.db import Store
 
 COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$")
 SNIPPET = 160
+SUBJECT_BYTES = 400
 
 
 def _snip(text: str, limit: int = SNIPPET) -> str:
-    text = " ".join(text.split())
+    text = " ".join(textsafe.clean(text).split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _git_subject(project_dir: str, sha: str) -> str | None:
+    """The subject line of a commit in the linked project. Reads at most a few hundred bytes of git's output."""
+    command = [
+        # a linked repository is someone else's configuration: never let it prompt, lock or run a helper program
+        "git", "-C", project_dir, "--no-optional-locks", "-c", "core.fsmonitor=false", "log", "-1", "--format=%s", sha, "--",
+    ]
     try:
-        out = subprocess.run(
-            ["git", "-C", project_dir, "log", "-1", "--format=%s", sha, "--"],
-            capture_output=True, text=True, timeout=5,
+        proc = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError:
         return None
-    return out.stdout.strip() or None if out.returncode == 0 else None
+    timer = threading.Timer(5.0, proc.kill)
+    timer.start()
+    try:
+        first = proc.stdout.read(SUBJECT_BYTES)  # bounded: it never holds more than this, whatever git prints
+    finally:
+        timer.cancel()
+        proc.kill()
+        proc.wait()
+        proc.stdout.close()
+    subject = first.decode(errors="replace").split("\n", 1)[0].strip()
+    return textsafe.one_line(subject) or None
 
 
 def _ref_note(ref: str, project_dir: str | None) -> str:
@@ -94,7 +113,7 @@ def render(data: dict, title: bool = False) -> str:
         out += [f"# Room: {data['room']}", ""]
     minutes = max(1, round((data["ended"] - data["started"]) / 60))
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(data["started"]))
-    head = f"Topic: {data['topic']}\n" if data["topic"] else ""
+    head = f"Topic: {textsafe.one_line(data['topic'])}\n" if data["topic"] else ""
     people = ", ".join(f"{n} ({k})" for n, k in data["members"])
     out += [
         f"{head}Started {when}, {minutes} min, {data['messages']} messages, about {data['tokens']:,} weighted tokens.",
@@ -120,9 +139,17 @@ def render(data: dict, title: bool = False) -> str:
     return "\n".join(out)
 
 
+MAX_REFS_CHECKED = 25  # the daemon waits on these, so how many refs it looks up (and for how long) is capped
+REF_CHECK_SECONDS = 6.0
+
+
 def with_ref_notes(data: dict) -> dict:
     """Add what the linked project can say about each ref (commit subjects, missing files)."""
-    notes = {ref: _ref_note(ref, data["project_dir"]) for ref, _ in data["refs"]}
+    notes, deadline = {}, time.monotonic() + REF_CHECK_SECONDS
+    for ref, _ in data["refs"][:MAX_REFS_CHECKED]:
+        if time.monotonic() > deadline:
+            break
+        notes[ref] = _ref_note(ref, data["project_dir"])
     return {**data, "ref_notes": {k: v for k, v in notes.items() if v}}
 
 
@@ -135,7 +162,7 @@ def transcript(store: Store, room: str) -> str:
             continue
         mark = {"decision": " **DECISION**", "human_approve": " **APPROVED**"}.get(m["kind"], "")
         who = m["author"] + (" (human)" if m["from"] == "human" else "")
-        body = m["body"].replace("\n", "\n  ")
+        body = textsafe.clean(m["body"]).replace("\n", "\n  ")
         refs = f" [refs: {', '.join(m['refs'])}]" if m["refs"] else ""
         out.append(f"- {stamp} **{who}**{mark}: {body}{refs}")
     return "\n".join(out)

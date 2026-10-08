@@ -5,7 +5,7 @@ import subprocess
 import sys
 import threading
 
-from acm import client, fmt
+from acm import client, fmt, textsafe
 from acm.errors import AcmError
 
 try:
@@ -77,7 +77,7 @@ def run_room(room: str, name: str) -> None:
     events = client.watch(room)  # subscribe before reading history so nothing falls in the gap
     history = client.request("tail", room=room, n=20)["messages"]
     client.request("read", room=room, member=name)  # joins and marks everything so far as read
-    topic = f" - {info['topic']}" if info["topic"] else ""
+    topic = f" - {textsafe.one_line(info['topic'])}" if info["topic"] else ""
     print(f"room {room}{topic}  (you are {name}, /help for commands)")
     for m in history:
         print(fmt.message(m, printer.color))

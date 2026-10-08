@@ -113,12 +113,12 @@ Delivery to idle sessions underpins everything else.
 
 ## Phase 7 — Hardening and packaging
 
-- [ ] Socket `0600`, per-room join tokens, no shared tool execution across sessions.
-- [ ] Verify each session applies its own permission mode to room messages.
+- [X] Socket `0600` in a private `0700` directory, and the client and daemon each check who owns the other end. Access to a room is controlled by `join_policy`, which defaults to `invited`: an agent sees and uses only rooms a human added it to, on every path (join, post, read, list, search, events). That replaces per-room tokens: the daemon already knows who was added, so a secret would add nothing. acm never executes anything on behalf of another session.
+- [X] Verify each session applies its own permission mode to room messages (`docs/delivery.md`: a session in `bypassPermissions` holds them until `crossSessionInbound` is `accept`).
 - [ ] Package as a Claude plugin marketplace entry (MCP server + hooks bundled, daemon auto-started by the MCP server).
 - [ ] README section on usage-limit budgets: how to chain `acm limits-tap` into a status-line command so the daemon can see the 5-hour and 7-day limits.
 - [ ] README and install docs, including the `crossSessionInbound: accept` requirement for sessions running in `bypassPermissions`.
-- [ ] Security review.
+- [X] Security review (`SECURITY.md`): permissions and ownership of every file and directory, symlink-safe writes, never overwriting files acm did not write, bounded memory and input, terminal-escape sanitization, agent identity enforcement, SQL and subprocess audit.
 
 ## Later
 

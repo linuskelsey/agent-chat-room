@@ -294,10 +294,15 @@ class TmuxUITest(unittest.TestCase):
         self.send("Escape")
         self.send("q")
         end = time.time() + 5
-        while time.time() < end and "key 'q'" not in (open(log).read() if os.path.exists(log) else ""):
+        def read_log():
+            if not os.path.exists(log):
+                return ""
+            with open(log) as f:
+                return f.read()
+
+        while time.time() < end and "key 'q'" not in read_log():
             time.sleep(0.1)
-        with open(log) as f:
-            text = f.read()
+        text = read_log()
         self.assertIn("request list_rooms", text)
         self.assertIn("redraw", text)
         self.assertIn("-> ENTER", text)

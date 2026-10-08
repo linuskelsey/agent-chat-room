@@ -18,7 +18,7 @@ class HumanOnlyTest(unittest.TestCase):
             **os.environ, "ACM_RUNTIME": os.path.join(cls.tmp.name, "run"), "ACM_DATA": os.path.join(cls.tmp.name, "data"),
             "CLAUDE_CONFIG_DIR": cls.claude, "PYTHONPATH": SRC, "ACM_ALLOW_NO_TTY": "1",
         }
-        cls.run_acm("new", "ho", name="kit")
+        cls.run_acm("new", "ho", "-L", "join_policy=anyone", name="kit")  # these tests are about who is a human, not who may join
 
     @classmethod
     def tearDownClass(cls):
@@ -74,12 +74,13 @@ class HumanOnlyTest(unittest.TestCase):
         env = {**self.env, "ACM_NAME": "botty"}
         r = self.child_of_session(
             "from acm import client;"
-            "print(client.request('post',room='ho',author='botty',body='agent post',**{'from':'agent'})['message']['id'])",
+            "import os;print(client.request('post',room='ho',author=f'agent-{os.getppid()}',body='agent post',**{'from':'agent'})['message']['id'])",
             env,
         )
         self.assertEqual(r.returncode, 0, r.stderr)
         msgs = json.loads(self.run_acm("read", "ho", "--since", "0", "--json").stdout)["messages"]
-        self.assertEqual([(m["author"], m["from"]) for m in msgs if m["body"] == "agent post"], [("botty", "agent")])
+        who = [(m["author"], m["from"]) for m in msgs if m["body"] == "agent post"]
+        self.assertEqual([(a.startswith("agent-"), f) for a, f in who], [(True, "agent")])  # as the session itself
 
     def test_03_humans_in_a_normal_terminal_can_do_everything(self):
         self.assertEqual(self.run_acm("new", "second").returncode, 0)

@@ -7,7 +7,7 @@ import os
 import sys
 import time
 
-from acm import client, config, fmt, paths, usagelimits
+from acm import __version__, client, config, fmt, paths, textsafe, usagelimits
 from acm.errors import AcmError
 
 
@@ -57,7 +57,7 @@ def cmd_new(args) -> None:
     r = client.request(
         "create_room", name=args.room, by=args.name, topic=args.topic, dir=args.dir, continue_from=args.continue_from
     )["room"]
-    print(f"created room {r['name']}" + (f" - {r['topic']}" if r["topic"] else ""))
+    print(f"created room {r['name']}" + (f" - {textsafe.one_line(r['topic'])}" if r["topic"] else ""))
     if args.continue_from:
         print(f"seeded with the summary of {args.continue_from}")
     if args.limit:
@@ -402,7 +402,7 @@ def cmd_search(args) -> None:
         return
     needle = " ".join(args.text).lower()
     for m in res:
-        body = " ".join(m["body"].split())
+        body = " ".join(textsafe.clean(m["body"]).split())
         at = max(0, body.lower().find(needle) - 40)
         snippet = ("…" if at else "") + body[at : at + 120] + ("…" if len(body) > at + 120 else "")
         closed = " [closed]" if m["room_status"] == "closed" else ""
@@ -490,6 +490,7 @@ def cmd_room(args) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="acm", description="Group chat rooms for AI agents and humans.")
     p.add_argument("--as", dest="name", default=default_name(), metavar="NAME", help="your name (default: $ACM_NAME or $USER)")
+    p.add_argument("--version", action="version", version=f"acm {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def add(name, fn, help, json_flag=False):

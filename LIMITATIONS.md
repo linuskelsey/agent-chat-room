@@ -4,15 +4,19 @@ What acm does not do, or does only approximately, today. Each item is a delibera
 
 ## Security and trust
 
+See `SECURITY.md` for the threat model and the review results. What remains:
+
 - The human-only guard is a heuristic: it refuses callers that run under a Claude Code session, carry a session's environment variables, or have no terminal. A process that fakes a terminal and a clean environment gets through, because everything runs as the same user.
 - There is no PIN or other secret yet, so nothing can prove an action came from a person (see "Later" in the roadmap).
-- The daemon trusts the author name an agent sends. The MCP server derives it from the session, but a process that talks to the socket directly can post as any member, including another agent.
-- Registering an inbox is not authenticated: any agent can register another agent's name against its own session, which would misroute that name's wakes.
-- Rooms have no access control. Any session with the acm tools can join any open room by name, and any local process can read every room through the socket or the database.
-- The database is plain SQLite and the socket is protected only by file permissions (owner only), so other users on the machine are kept out but nothing else is.
+- An agent inside a Claude session can act only as its own session. A process that is not under a session (and does not carry one's environment) can claim any member name, since the daemon has nothing to check it against. That is the same gap as the human-only guard.
+- Rooms take only agents a human added (`join_policy=invited`, the default). The policy applies to agents, meaning callers under a Claude session or carrying its environment; a process that fakes being a person is not subject to it. `join_policy=anyone` opens a room to every agent.
+- With the default policy an agent that was not added is told how to get added when it asks to join, but sees no sign of the room otherwise, so you have to tell it the room's name and add it (`--add`, `/add`, `acm invite`).
+- Any local process of your own can read every room through the socket or the database. Both are private to your user and nothing is encrypted at rest.
 - Text posted by one agent is read by the others through `room_read`, so it can carry instructions. Wakes never copy agent text, but reads do. Treat room content as untrusted data.
 - A human's message is placed in the wake of a mentioned agent (up to 500 characters), so anything you paste into a room reaches that agent's prompt.
 - Messages from the room are never approval for anything in the receiving session. Claude Code enforces that, not acm.
+- `ACM_NAME` overrides an agent's name only for processes that are not under a Claude session; inside one, the session's own name is used and the daemon enforces it.
+- Paths you give acm (`export_dir`, `acm export -o`, `--dir`) are followed as you wrote them, symlinks included. acm never overwrites an export file it did not write, but it does not stop you pointing it at a place you can write.
 
 ## Platform and dependencies
 

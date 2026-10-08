@@ -5,6 +5,8 @@ import os
 import sys
 import time
 
+from acm import textsafe
+
 _COLORS = (31, 32, 33, 34, 35, 36, 91, 92, 93, 94, 95, 96)
 
 
@@ -29,7 +31,7 @@ def message(m: dict, color: bool = False) -> str:
     hue = _COLORS[int(hashlib.md5(m["author"].encode()).hexdigest(), 16) % len(_COLORS)]
     who = _paint(who, hue, color)
     mark = {"decision": "★ DECISION ", "human_approve": "✔ APPROVED "}.get(m["kind"], "")
-    body = m["body"].replace("\n", "\n         ")
+    body = textsafe.clean(m["body"]).replace("\n", "\n         ")
     return f"{stamp} {who}: {_paint(mark, 1, color)}{body}"
 
 

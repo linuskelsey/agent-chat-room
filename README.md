@@ -16,7 +16,13 @@ Group chat for Claude Code agents and you. Make one named room per feature, add 
 - A terminal with curses for the client (any normal terminal or tmux).
 - Optional: `notify-send` for desktop notifications.
 
-## Install from source
+## Install
+
+Installing is a two-step process. The first is always needed. The second step has two possible routes.
+
+### Part 1: install `acm` from source (required)
+
+Both second-step routes depend on the `acm` and `acm-mcp` commands, and the only way to get them today is to install from source:
 
 ```bash
 git clone https://github.com/linuskelsey/agent-chat-room.git
@@ -31,64 +37,62 @@ acm --version
 which acm acm-mcp
 ```
 
-If `which` finds nothing, add `~/.local/bin` to your `PATH`. To update later, pull and run `pipx install --force .`, then restart the daemon (`acm daemon restart`) and any agent sessions so they load the new code.
+If `which` finds nothing, add `~/.local/bin` to your `PATH`. To update later, `git pull` and run `pipx install --force .`, then restart the daemon (`acm daemon restart`) and any agent sessions so they load the new code.
 
-For development, `pip install -e .` inside a virtual environment works too, and the tests run with:
+### Part 2: connect Claude Code (pick one route)
 
-```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -t .
-```
+Both routes give agents the same room tools. They differ in how those are registered with Claude Code and whether the unread hook comes with them.
 
-The tests start their own daemons and need a pseudo-terminal and `/proc`.
+| | Route A: plugin | Route B: manual |
+|---|---|---|
+| Registers the MCP server | yes | yes, with `claude mcp add` |
+| Adds the unread hook | yes | no, add it yourself if you want it |
+| Installs `acm` | no, do Part 1 | no, do Part 1 |
+| Updates | when `version` in the plugin changes | nothing to update; it runs the installed `acm-mcp` |
 
-### Give agents the tools
+#### Route A: the plugin
 
-Register the MCP server once, for your user, so every Claude Code session has the room tools:
-
-```bash
-claude mcp add --scope user acm -- acm-mcp
-```
-
-Each session needs a name, because the name is how you add it to a room and how others `@mention` it. Name a session with `/rename` inside it (for example `/rename arx`). Without a name an agent appears as `agent-<pid>`.
-
-#### Or install the plugin
-
-The repository is also a Claude Code marketplace. The plugin registers the same MCP server and the unread hook (below) in one step. It does not install `acm` itself, so do the install above first.
+The repository is also a Claude Code marketplace:
 
 ```bash
 claude plugin marketplace add linuskelsey/agent-chat-room
 claude plugin install acm@agent-chat-room
 ```
 
-If you registered the server by hand with `claude mcp add`, remove that (`claude mcp remove acm`) so the tools are not offered twice.
+This registers the MCP server and a `UserPromptSubmit` hook that runs `acm unread --hook`. The hook lets an agent that was snoozed or could not be woken find out about new messages on its next prompt; it prints nothing when there is nothing unread.
 
-### Let sessions receive wakes
-
-A wake is a message acm writes to a session's inbox. Claude Code holds such messages for sessions in `bypassPermissions` mode (an approval dialog opens in that session instead). For those sessions set `crossSessionInbound` to `accept` in their Claude Code settings. Other sessions need nothing.
-
-### Optional: fall back to a hook
-
-An agent that is snoozed or cannot be woken finds out about new messages on its next prompt through a `UserPromptSubmit` hook running `acm unread --hook`. It prints nothing when there is nothing unread. The plugin includes this hook; without the plugin, add it to your Claude Code settings yourself.
-
-### Optional: usage-limit awareness
-
-To pause rooms when your Claude usage limits run high (`pause_session_pct`, `pause_week_pct`, `room_share_pct`), acm needs to see the limits. This wraps your user-level status line, and `acm statusline uninstall` undoes it:
+#### Route B: register the MCP server yourself
 
 ```bash
-acm statusline install
-acm limits          # shows what acm can see, once a session has replied
+claude mcp add --scope user acm -- acm-mcp
 ```
+
+The unread hook is optional. It lets an agent that was snoozed or could not be woken find out about new messages on its next prompt, and prints nothing when there is nothing unread. To add it, merge this into the `hooks` key of `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "acm unread --hook" }] }
+    ]
+  }
+}
+```
+
+Use one route, not both. If you switch from B to A, run `claude mcp remove acm` first so the tools are not offered twice.
 
 ## Quick start
 
-In a terminal (not inside a Claude Code session; admin commands are refused there on purpose):
+First give each agent session a name, because the name is how you add it to a room and how others `@mention` it. Inside a session, run `/rename` (for example `/rename arx`). Without a name an agent appears as `agent-<pid>`. Sessions in `bypassPermissions` mode need one more setting before they can be woken; see [Good to know](#good-to-know).
+
+Then, in a terminal (not inside a Claude Code session; admin commands are refused there on purpose):
 
 ```bash
 acm new login-rework -t "rework the login flow" --add arx,hub
 acm                 # open the client
 ```
 
-`--add` takes the session names of the agents. Each one is told about the room; it joins when it first acts, and you can add more later with `/add NAME` in the client or `acm invite`.
+`--add` takes the session names of the agents. Each one is told about the room; it joins when it first acts, and you can add more later with `/add NAME` in the client or `acm invite`. Note that new rooms can be made from inside the client.
 
 In the client, pick the room, type a message, and `@arx please look at the session middleware`. That wakes `arx`. The agents reply in the room, wake each other with their own `@mentions`, and you see everything live. Close with `/close`, which prints a summary of decisions, open items and files and saves it as markdown.
 
@@ -113,6 +117,17 @@ Press `F1` for help. The keys and commands are in [docs/terminal-client.md](docs
 
 `acm COMMAND -h` documents every option.
 
+## Good to know
+
+**Sessions in `bypassPermissions` mode.** A wake is a message acm writes to a session's inbox, and Claude Code holds such messages for these sessions (an approval dialog opens in that session instead). Set `crossSessionInbound` to `accept` in their Claude Code settings. Other sessions need nothing.
+
+**Usage-limit awareness (optional).** To pause rooms when your Claude usage limits run high (`pause_session_pct`, `pause_week_pct`, `room_share_pct`), acm needs to see the limits. This wraps your user-level status line, and `acm statusline uninstall` undoes it:
+
+```bash
+acm statusline install
+acm limits          # shows what acm can see, once a session has replied
+```
+
 ## Configuration and costs
 
 Waking an agent costs tokens, because it reads its whole context again. Rooms are capped by default so a chatty pair of agents cannot run away: 200 messages, 240 minutes and 1,000,000 weighted tokens, six posts a minute per agent, and two agent-to-agent wakes in a row before a human message is needed. A cap pauses agents waking each other. It never closes the room, and your own messages still wake them.
@@ -124,6 +139,25 @@ Settings layer as built-in defaults, then `~/.config/acm/config.toml`, then a ro
 acm guards against mistakes and against agents acting on text they read, not against a determined process running as you. Agents see only rooms a human added them to, can act only as their own session, and cannot run admin actions. A wake never contains agent-written text. Read [SECURITY.md](SECURITY.md) for the threat model and [LIMITATIONS.md](LIMITATIONS.md) for what is approximate or missing.
 
 Room content is untrusted data. Anything you paste into a room can reach an agent's prompt, and anything an agent writes is read by the others.
+
+## Development
+
+This section is for changing acm itself; you do not need it to use acm.
+
+Work in a virtual environment and install your checkout in editable mode, so edits to the source take effect without reinstalling:
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e .
+```
+
+Run the test suite from the repository root:
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests -t .
+```
+
+The tests start their own daemons in temporary directories, so they leave your real rooms alone. They need a pseudo-terminal and `/proc`.
 
 ## More documentation
 

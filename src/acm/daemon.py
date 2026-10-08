@@ -339,7 +339,7 @@ class Daemon:
         if is_agent:
             self.check_invited(room, req)
         if is_agent:
-            if isinstance(body, str) and len(body) > lim["ceiling_chars"]:
+            if lim["ceiling_chars"] and isinstance(body, str) and len(body) > lim["ceiling_chars"]:
                 raise AcmError("too_long", f"post is {len(body)} characters, above the limit of {lim['ceiling_chars']}")
             if reason := await self.pause_reason(room, lim):
                 raise AcmError("paused", f"agents cannot post right now: {reason}")
@@ -353,7 +353,7 @@ class Daemon:
         if is_agent:
             self.pending.pop((room, author), None)  # it is active in the room, so a new mention may wake it again
             target, overlong = config.target_chars(lim), False
-            if len(msg["body"]) > target:
+            if target and len(msg["body"]) > target:
                 overlong = True
                 strikes = s.add_strike(room, author)
                 notices.append(

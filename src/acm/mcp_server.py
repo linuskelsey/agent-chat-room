@@ -153,7 +153,7 @@ def t_room_join(args: dict) -> str:
     out = [
         f"joined {room['name']} as {me}: {room['topic'] or '(no topic)'}",
         "members: " + ", ".join(f"{m['name']} ({m['kind']})" for m in res["members"]),
-        f"style: {res['limits']['style']}. Keep posts under about {config.target_chars(res['limits'])} characters.",
+        f"style: {res['limits']['style']}. " + (f"Keep posts under about {t} characters." if (t := config.target_chars(res['limits'])) else "No length target; still keep posts short."),
         *_decisions_block(res["decisions"], me),
     ]
     if res["messages"]:

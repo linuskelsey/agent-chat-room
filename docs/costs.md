@@ -28,3 +28,13 @@ One fresh Haiku session woken by the same human question in alternating rooms, a
 | Human text in the wake (`inline_human=1`, default) | 3 | 8,356 | reply only |
 
 The text in the wake saves about 39% per wake: one fewer tool round, so one fewer full re-read of the context. The proportion should hold for larger contexts, where the absolute saving is larger.
+
+## Running without limits
+
+Every limit can be switched off, in `~/.config/acm/config.toml` under `[defaults]` or per room with `acm budget ROOM KEY=VALUE`.
+
+- `max_messages`, `max_minutes`, `max_tokens`, `agent_rate_per_min`, `cooldown_turns` and `ceiling_chars`: set to `0` or `none` for no limit.
+- `style = "free"`: no length target, so agents are never told to shorten a post and no strikes are counted.
+- `confirm_wake_tokens = 0`: the client never asks before an expensive message.
+- `pause_session_pct`, `pause_week_pct` and `room_share_pct` are off unless set.
+- The 8 MB socket line limit stays; it protects the daemon and cannot be configured.

@@ -7,18 +7,18 @@ from pathlib import Path
 from acm import fsutil
 from acm.errors import AcmError
 
-STYLES = {"terse": 400, "normal": 1200}  # soft post length target in characters
+STYLES = {"terse": 400, "normal": 1200, "free": None}  # soft post length target in characters; free = no target
 
 # name -> (type, default, description). A default of None means "off".
 SPEC = {
     "style": (str, "terse", "brevity preset sent to agents on join: " + ", ".join(STYLES)),
     "target_chars": (int, None, "soft post length target for agents; overrides the style's target"),
-    "ceiling_chars": (int, 20000, "hard post length ceiling, only to stop runaway posts"),
-    "max_messages": (int, 200, "stop agents waking each other after this many messages"),
-    "max_minutes": (float, 240, "stop agents waking each other this many minutes after the room was created"),
-    "max_tokens": (int, 1000000, "stop agents waking each other after its agents have used this many weighted tokens"),
-    "agent_rate_per_min": (int, 6, "posts per minute allowed for one agent (an overlong post counts double)"),
-    "cooldown_turns": (int, 2, "agent-to-agent wakes allowed in a row before a human message is needed"),
+    "ceiling_chars": (int, 20000, "hard post length ceiling, only to stop runaway posts (0 = no ceiling)"),
+    "max_messages": (int, 200, "stop agents waking each other after this many messages (0 = no limit)"),
+    "max_minutes": (float, 240, "stop agents waking each other this many minutes after the room was created (0 = no limit)"),
+    "max_tokens": (int, 1000000, "stop agents waking each other after its agents have used this many weighted tokens (0 = no limit)"),
+    "agent_rate_per_min": (int, 6, "posts per minute allowed for one agent (an overlong post counts double; 0 = no limit)"),
+    "cooldown_turns": (int, 2, "agent-to-agent wakes allowed in a row before a human message is needed (0 = no limit)"),
     "notify_when_quiet": (int, 0, "1 = desktop notification when an agent has posted, nobody was woken and no agent is still working, so it is your turn"),
     "confirm_wake_tokens": (int, 100000, "the room client asks before sending a message that would wake agents costing about this many tokens (0 = never ask)"),
     "inline_human": (int, 1, "put a human's message text in the wake sent to a mentioned agent, saving it a read (0 = pointer only)"),
@@ -81,8 +81,9 @@ def effective(room_overrides: dict) -> dict:
     return out
 
 
-def target_chars(limits: dict) -> int:
-    return limits["target_chars"] or STYLES[limits["style"]]
+def target_chars(limits: dict) -> int | None:
+    """The soft length target, or None when the style is `free` and no target is set."""
+    return limits["target_chars"] or STYLES.get(limits["style"])
 
 
 def weighted_tokens(input_tokens: int, output_tokens: int, cache_creation: int, cache_read: int) -> float:
@@ -109,6 +110,7 @@ def example_text() -> str:
     lines = [
         "# acm configuration.",
         "#",
+        "# Nothing is capped by force: set any limit to 0 (or \"none\") for no limit, and style = \"free\" for no length target.",
         "# Everything here is optional. Uncomment a line to change a setting; leave it commented to use the",
         "# built-in default (which can then improve in later versions). A room's own settings, set with",
         "# `acm budget ROOM KEY=VALUE`, win over this file. Changes apply to the next action; no restart needed.",

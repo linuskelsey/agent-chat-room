@@ -83,7 +83,10 @@ def cmd_budget(args) -> None:
     line("messages", used["max_messages"], lim["max_messages"])
     line("minutes", used["max_minutes"], lim["max_minutes"])
     line("tokens", used["max_tokens"], lim["max_tokens"], f"  (agents {usage['wake']}, posts {usage['post']})")
-    print(f"  style {lim['style']} (target {config.target_chars(lim)} chars), rate {lim['agent_rate_per_min']}/min, cooldown {lim['cooldown_turns']} turns")
+    target = config.target_chars(lim)
+    rate, cooldown = lim["agent_rate_per_min"], lim["cooldown_turns"]
+    print(f"  style {lim['style']} ({f'target {target} chars' if target else 'no length target'}), "
+          f"{f'rate {rate}/min' if rate else 'no rate limit'}, {f'cooldown {cooldown} turns' if cooldown else 'no cooldown'}")
     print(f"  summary on close: {lim['export_dir'] or paths.data_dir() / 'rooms'}/{args.room}.md" + ("" if lim["export_dir"] else " (default)"))
     for key in ("pause_session_pct", "pause_week_pct", "room_share_pct"):
         if lim[key] is not None:

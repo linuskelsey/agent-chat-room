@@ -711,5 +711,28 @@ class GuardrailTest(unittest.TestCase):
         self.assertNotEqual(run("budget", "g14", "max_messages=-5").returncode, 0)
 
 
+    def test_15_every_limit_can_be_switched_off(self):
+        off = dict(max_messages=0, max_minutes=0, max_tokens=0, agent_rate_per_min=0, cooldown_turns=0,
+                   ceiling_chars=0, style="free", confirm_wake_tokens=0)
+        r = self.room("g15", **off)
+        for n in range(12):  # past the rate limit, the cooldown and the message cap's warning level
+            res = self.post(r, "arx", f"@hub round {n} " + "x" * 1000)
+            self.assertEqual(res["notices"] and [n for n in res["notices"] if "target" in n], [])
+            self.client.request("read", room=r, member="hub", kind="agent")
+        self.post(r, "arx", "z" * 50000, no_reply_needed=True)  # above the usual ceiling
+        b = self.budget(r)
+        self.assertEqual(b["paused"], None)
+        self.assertEqual(b["exceeded"], [])
+        # the same through `none`, which the config file and `acm budget` both accept
+        r2 = self.room("g15b", max_messages="none", ceiling_chars="none", agent_rate_per_min="none", cooldown_turns="none")
+        self.post(r2, "arx", "z" * 50000, no_reply_needed=True)
+        run = lambda *a: subprocess.run([sys.executable, "-m", "acm", "--as", "kit", *a], capture_output=True, text=True)
+        out = run("budget", "g15").stdout
+        self.assertIn("no rate limit", out)
+        self.assertIn("no cooldown", out)
+        self.assertIn("no length target", out)
+        self.assertIn("no cap", out)
+
+
 if __name__ == "__main__":
     unittest.main()

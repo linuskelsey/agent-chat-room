@@ -49,6 +49,7 @@ class Model:
         self.selected: str | None = None
         self.notice = ""  # a line for the status bar: warnings, results of actions
         self.confirm_over = 100000
+        self.focused = True  # False while the terminal is not in focus: messages then stay unread for others to see
 
     # -- rooms ---------------------------------------------------------
 
@@ -112,6 +113,12 @@ class Model:
         if room:
             room.members = {m["name"]: m for m in self.request("members", room=room.name)["members"]}
 
+    def set_focus(self, focused: bool) -> None:
+        """The terminal gained or lost focus. Regaining it reads whatever arrived in the open conversation meanwhile."""
+        self.focused = focused
+        if focused and self.current:
+            self.mark_read(self.current)
+
     def mark_read(self, room: Room) -> None:
         """Move my read position to the end. Only members have one, so looking at a room never joins it."""
         if room.joined and room.unread:
@@ -154,10 +161,10 @@ class Model:
                 if m["kind"] == "decision":
                     room.decisions.append(m)
             if m["kind"] != "system" and m["author"] != self.me:
-                if name == self.selected:  # I am looking at it: it is read as it arrives
+                if name == self.selected and self.focused:  # I am looking at it: it is read as it arrives
                     room.unread = 1 if room.joined else 0
                     self.mark_read(room)
-                elif room.joined:
+                elif room.joined:  # elsewhere, or the window is out of focus: it waits until I look
                     room.unread += 1
             return True
         if kind == "deleted":

@@ -77,6 +77,7 @@ A room goes quiet when an agent posts and nobody is woken, which is easy to miss
 ## Options
 
 - The mouse works by default: the wheel scrolls the conversation three lines a notch (over the list it moves between conversations) and a click selects a conversation. A mouse-aware program takes the mouse from the terminal, so select text with Shift held (as in vim or tmux), or set `ACM_NO_MOUSE=1` to leave the mouse alone.
+- The client reads a conversation as messages arrive only while its terminal has focus. In a terminal that reports focus (most modern ones, including under Hyprland), a message that lands while you are in another window stays unread for everything else that looks at acm, such as a bar widget, and is marked read the moment you return. tmux needs `set -g focus-events on`, and only reports the active pane and window. `ACM_NO_FOCUS=1` turns focus reporting off, which brings back reading as it arrives.
 - `ACM_UI_LOG=/path/to/file` writes a timing log: each key as it arrives, each redraw and each request to the daemon, with milliseconds. Use it to find where time goes if the client feels slow.
 - `--as NAME` sets your name, as with every `acm` command. The default is `$ACM_NAME`, then `$USER`.
 

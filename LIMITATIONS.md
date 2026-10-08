@@ -67,6 +67,7 @@ See `SECURITY.md` for the threat model and the review results. What remains:
 - The terminal client (`acm ui`) has a single-line message box: no multi-line input, no bracketed paste (a pasted newline sends), and no text selection inside it.
 - The terminal client shows at most the last 200 messages of a conversation and loads more a page at a time when you scroll up. It has no in-conversation search.
 - The terminal client captures the mouse so the wheel can scroll, which means selecting text needs Shift held in most terminals. `ACM_NO_MOUSE=1` turns that off.
+- Messages count as read as they arrive only while the client's terminal reports that it has focus. A terminal or multiplexer that does not report focus (tmux without `focus-events on`, or a terminal that ignores the request) leaves the client treating the window as always focused, so an open client reads everything in its selected conversation, in view or not.
 - The "waiting for you" alert relies on the `status` field in Claude Code's session records, which is not a documented contract, and only watches agents for the 15 minutes after a wake. An agent blocked on its own, outside a wake, is not reported.
 - `notify_when_quiet` judges a room quiet from the same status field and only after an agent's post that woke nobody; it does not notice a room that went quiet any other way.
 - Function keys (F1 to F4) can be intercepted by some terminals and multiplexers. Every function-key action also has a typed form (`?`, `/fyi`, `/decision`).

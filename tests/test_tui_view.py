@@ -538,6 +538,19 @@ class ControllerTest(unittest.TestCase):
         self.assertEqual(m.selected, next(iter(m.rooms)))
         self.assertIn(f"deleted {before}", m.notice)
 
+    def test_focus_reports_are_decoded_and_applied_without_touching_the_screen_state(self):
+        self.assertEqual(tui.decode_escape("[I"), ["FOCUS_IN"])
+        self.assertEqual(tui.decode_escape("[O"), ["FOCUS_OUT"])
+        m = self.setup()
+        m.notice = "kept"
+        calls = []
+        m.set_focus = lambda focused: calls.append(focused)
+        self.ctl.key("FOCUS_OUT")
+        self.ctl.key("FOCUS_IN")
+        self.assertEqual(calls, [False, True])
+        self.assertEqual(m.notice, "kept")
+        self.assertEqual(self.ops(), [])
+
     def test_clicking_a_conversation_selects_it(self):
         m = FakeModel([room("a", last_ts=2), room("b", last_ts=1)])
         m.request = lambda op, **kw: {"members": []} if op == "members" else {"messages": [], "decisions": []}

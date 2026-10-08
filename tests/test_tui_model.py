@@ -271,6 +271,22 @@ class ModelTest(unittest.TestCase):
         self.assertIn("deleted tdel3", done.stdout)
         self.assertNotIn(r, run("ls", "--all").stdout)
 
+    def test_11e_an_unfocused_window_leaves_new_messages_unread_until_focus_returns(self):
+        r = self.room("tfocus", agents=("arx",))
+        self.say(r, "kit", "hi", kind="human")
+        m = self.model()
+        m.select(r)
+        listed = lambda: next(x for x in self.client.request("list_rooms", member="kit")["rooms"] if x["name"] == r)["unread"]
+        m.set_focus(False)
+        self.say(r, "arx", "while you were away")
+        m.apply({"event": "message", "room_name": r, "message": self.client.request("tail", room=r, n=1)["messages"][0]})
+        self.assertEqual((m.rooms[r].unread, listed()), (1, 1))  # shown as unread here, and for everyone else
+        m.set_focus(True)
+        self.assertEqual((m.rooms[r].unread, listed()), (0, 0))
+        self.say(r, "arx", "now I am looking")
+        m.apply({"event": "message", "room_name": r, "message": self.client.request("tail", room=r, n=1)["messages"][0]})
+        self.assertEqual((m.rooms[r].unread, listed()), (0, 0))  # read as it arrives, as before
+
     def test_12_mute_and_invite_report_back(self):
         r = self.room("tr", agents=("arx",))
         m = self.model()

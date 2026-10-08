@@ -202,6 +202,52 @@ class TmuxUITest(unittest.TestCase):
         with self.assertRaises(self.client.AcmError):
             self.client.request("get_room", name="doomed")
 
+    def test_07c_messages_stay_unread_while_the_terminal_is_out_of_focus(self):
+        # A detached tmux session has no outer terminal to report focus, so the reports a real terminal sends
+        # (Esc [ O when focus is lost, Esc [ I when it returns) are typed in as bytes.
+        self.room("watchful")
+        self.say("watchful", "arx", "first", kind="agent")
+        self.start("t07c")
+        self.wait_for("watchful")
+        unread = lambda: next(r for r in self.client.request("list_rooms", member="kit")["rooms"] if r["name"] == "watchful")["unread"]
+        self.assertEqual(unread(), 0)
+        self.send("\x1b[O", literal=True)
+        self.say("watchful", "arx", "while you are away", kind="agent")
+        time.sleep(1)
+        self.assertEqual(unread(), 1)
+        self.assertNotIn("Esc", self.screen())  # it was not mistaken for a key press
+        self.send("\x1b[I", literal=True)
+        end = time.time() + 5
+        while unread() and time.time() < end:
+            time.sleep(0.1)
+        self.assertEqual(unread(), 0)
+        self.say("watchful", "arx", "and read as it arrives again", kind="agent")
+        time.sleep(1)
+        self.assertEqual(unread(), 0)
+
+    def test_07d_focus_reports_work_without_terminfo_support_and_do_not_cancel_a_prompt(self):
+        self.room("quiet-one")
+        self.start("t07d", term="screen")  # terminfo that does not describe focus reports: they arrive as raw escapes
+        self.wait_for("quiet-one")
+        unread = lambda: next(r for r in self.client.request("list_rooms", member="kit")["rooms"] if r["name"] == "quiet-one")["unread"]
+        self.send("Enter")
+        self.typed("/close")
+        self.send("Enter")
+        self.wait_for("close quiet-one?")
+        self.send("\x1b[O", literal=True)  # focus lost while a question is on screen
+        self.assertIn("close quiet-one?", self.screen())  # still asking
+        self.say("quiet-one", "arx", "hello while away", kind="agent")
+        time.sleep(1)
+        self.assertEqual(unread(), 1)
+        self.send("\x1b[I", literal=True)
+        self.assertIn("close quiet-one?", self.screen())
+        self.send("n")
+        end = time.time() + 5
+        while unread() and time.time() < end:
+            time.sleep(0.1)
+        self.assertEqual(unread(), 0)
+        self.assertEqual(self.client.request("get_room", name="quiet-one")["room"]["status"], "open")
+
     def test_08_narrow_terminals_show_one_pane_and_q_quits(self):
         self.room("kappa")
         self.start("t08", cols=50, rows=20)

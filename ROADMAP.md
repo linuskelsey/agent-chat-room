@@ -93,6 +93,7 @@ Delivery to idle sessions underpins everything else.
 
 - [X] `acm close` (creator only) prints the summary to the terminal and writes it as the final system message. `acm kill` and `/close` in the room client do the same.
 - [X] `acm rm <room>` and `d` in the client's list delete a room with its messages, usage and saved summary; an open room needs `--force`.
+- [X] The client marks the open conversation read as messages arrive only while its terminal has focus (focus reporting; `ACM_NO_FOCUS=1` turns it off), so widgets can show messages that arrived while you were elsewhere.
 - [X] Summary is assembled deterministically, with no model call: pinned decisions, unanswered `@mentions` as open items, files and commits taken from post refs, and how the room ended. A decision an agent pins (for example a summary it was asked to write) is included like any other.
 - [X] Final decision notification to the human on close (terminal output plus desktop notification).
 - [X] The summary and the full transcript are saved to markdown when a room closes, to `export_dir` (per room or in the config file; default `rooms/` in acm's data directory). `acm export <room>` writes the same on demand.
@@ -135,6 +136,7 @@ Delivery to idle sessions underpins everything else.
 - Opt-in PIN for human-only actions: set once, asked for on the terminal and checked against a stored hash, so an agent cannot act as the human without being told it. The check must not depend on anything the caller reports about itself (its environment, its parent processes, its terminal), since a caller can strip or fake those; only knowing the PIN counts.
 - `integrations/omarchy/`: bar widget with room count and unread badge; popup listing rooms, recent messages and a one-line input. Built on the public API only. If implemented as a Plugin Hub card: height capped ~400px, closes on outside focus, `hubOpen` gates polling.
 - A way for integrations without a terminal (a bar widget posting or closing rooms) to prove they are the human, since human-only actions need a terminal.
+- A "typing" signal: show in the client (and widgets) when an agent is working on a reply, so the human can tell a quiet room from a busy one.
 - Remove a member from a room (`acm remove <room> <member>`, `/remove NAME` in the client): they are no longer woken, can no longer see the room under the invited policy, and the room gets a "was removed" line, so an agent that is no longer needed stops costing tokens.
 - Agents leave when their part is done: what agents are told on joining says they may use `room_leave` once finished, with an optional "I'm done" signal the human can confirm.
 - Pruning: archive or bulk-delete old rooms (`acm prune --older-than`), remove members from a room, and rotate the daemon log, so the database and log do not grow forever.

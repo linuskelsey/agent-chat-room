@@ -6,6 +6,7 @@ only CursesCanvas and run() touch the terminal. What the client knows and does l
 
 import os
 import queue
+import sys
 import threading
 import time
 import unicodedata
@@ -506,6 +507,8 @@ class Controller:
 
     def key(self, key) -> None:
         v, m = self.view, self.model
+        if key in ("FOCUS_IN", "FOCUS_OUT"):  # the window changed focus; not something the person typed
+            return m.set_focus(key == "FOCUS_IN")
         previous, since = self.last, time.monotonic() - self.last_at
         self.last, self.last_at = key, time.monotonic()
         if previous == "ESC" and key == "q" and since < 0.08:
@@ -747,13 +750,17 @@ KEYMAP = {
     "KEY_F(1)": "F1", "KEY_F(2)": "F2", "KEY_F(3)": "F3", "KEY_F(4)": "F4", "KEY_ENTER": "ENTER",
     # modified arrows, as terminfo names them: Ctrl-Left/Right and Alt-Left/Right move by word
     "kLFT5": "WORD_LEFT", "kRIT5": "WORD_RIGHT", "kLFT3": "WORD_LEFT", "kRIT3": "WORD_RIGHT",
+    # focus reports, when curses knows them (otherwise they arrive as raw escape sequences, see ESCAPE_KEYS)
+    "kxIN": "FOCUS_IN", "kxOUT": "FOCUS_OUT",
 }
 # The same keys as raw escape sequences, for terminals whose terminfo does not describe them.
 ESCAPE_KEYS = {
     "[1;5D": "WORD_LEFT", "[1;5C": "WORD_RIGHT", "[1;3D": "WORD_LEFT", "[1;3C": "WORD_RIGHT",
     "[5D": "WORD_LEFT", "[5C": "WORD_RIGHT", "Od": "WORD_LEFT", "Oc": "WORD_RIGHT",
     "[1;2D": "LEFT", "[1;2C": "RIGHT",
+    "[I": "FOCUS_IN", "[O": "FOCUS_OUT",  # focus reporting, which the client asks the terminal for
 }
+FOCUS_ON, FOCUS_OFF = "\x1b[?1004h", "\x1b[?1004l"
 
 
 def decode_escape(sequence: str) -> list[str]:
@@ -812,7 +819,12 @@ class App:
                     raw = self.scr.get_wch()
                 except self.curses.error:
                     continue
+                if raw == "\x1b" and self.focus_report():
+                    continue
                 key = translate(raw)
+                if key in ("FOCUS_IN", "FOCUS_OUT"):
+                    self.controller.key(key)
+                    continue
                 if isinstance(key, str) and len(key) == 1:
                     return key.lower()
                 if key in ("ENTER", "ESC"):
@@ -832,7 +844,12 @@ class App:
                     raw = self.scr.get_wch()
                 except self.curses.error:
                     continue
+                if raw == "\x1b" and self.focus_report():
+                    continue
                 key = translate(raw)
+                if key in ("FOCUS_IN", "FOCUS_OUT"):
+                    self.controller.key(key)
+                    continue
                 if key == "ENTER":
                     return text
                 if key == "ESC":
@@ -843,6 +860,17 @@ class App:
                     text += key
         finally:
             view.prompt = None
+
+    def focus_report(self) -> bool:
+        """After an Esc: True if what followed was a focus report, which is applied; anything else was not for us.
+
+        A lone Esc (what a person pressing the key sends) is left as it was, so it still cancels a prompt.
+        """
+        keys = decode_escape(self.following_chars())
+        if keys in (["FOCUS_IN"], ["FOCUS_OUT"]):
+            self.controller.key(keys[0])
+            return True
+        return False
 
     def following_chars(self) -> str:
         """What arrives within a few milliseconds of an Esc: the rest of a key sequence, or nothing."""
@@ -940,6 +968,27 @@ class App:
             first = next((r for r in self.model.order() if r.unread), self.model.order()[0])
             self.model.select(first.name)
         threading.Thread(target=self.pump, daemon=True).start()
+        focus_reports = not os.environ.get("ACM_NO_FOCUS")
+        if focus_reports:  # terminals that do not know this ignore it, and the room then counts as always in focus
+            self._terminal(FOCUS_ON)
+        try:
+            self.loop()
+        finally:
+            if focus_reports:
+                self._terminal(FOCUS_OFF)
+        self.stopping.set()
+        if self.log:
+            self.log.close()
+
+    def _terminal(self, sequence: str) -> None:
+        try:
+            sys.stdout.write(sequence)
+            sys.stdout.flush()
+        except OSError:
+            pass
+
+    def loop(self) -> None:
+        c = self.curses
         dirty = True
         while not self.view.quit:
             if self.drain():
@@ -975,9 +1024,6 @@ class App:
                 continue
             self.controller.key(translate(raw))
             dirty = True
-        self.stopping.set()
-        if self.log:
-            self.log.close()
 
 
 def run(me: str) -> None:

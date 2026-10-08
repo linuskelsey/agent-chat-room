@@ -379,6 +379,15 @@ def cmd_kill(args) -> None:
     _show_closed(client.request("kill_room", name=args.room, by=args.name), "killed", args.room)
 
 
+def cmd_rm(args) -> None:
+    if not args.yes:
+        if input(f"delete {args.room} with its messages, usage and saved summary? this cannot be undone [y/N] ").strip().lower() != "y":
+            print("not deleted")
+            return
+    r = client.request("delete_room", name=args.room, force=args.force)
+    print(f"deleted {r['deleted']}: {r['messages']} messages, {r['members']} members" + (f"; removed {r['export_removed']}" if r["export_removed"] else ""))
+
+
 def cmd_summary(args) -> None:
     print(client.request("summary", room=args.room)["summary"])
 
@@ -607,6 +616,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add("kill", cmd_kill, "force-close a room, whoever created it")
     sp.add_argument("room")
+
+    sp = add("rm", cmd_rm, "delete a room with its messages, usage and saved summary")
+    sp.add_argument("room")
+    sp.add_argument("-y", "--yes", action="store_true", help="do not ask")
+    sp.add_argument("--force", action="store_true", help="delete a room that is still open")
 
     sp = add("daemon", cmd_daemon, "manage the background daemon")
     sp.add_argument("action", choices=["start", "stop", "restart", "status"])

@@ -160,6 +160,7 @@ HELP_SECTIONS = [
     ("Conversations", [
         ("Up / Down, j / k", "move between conversations"),
         ("n", "start a new conversation"),
+        ("d", "delete the selected conversation with its log and saved summary (asks first)"),
         ("Enter, Tab", "go to the message box"),
         ("Ctrl-N / Ctrl-P", "next / previous conversation, from anywhere"),
         ("PgUp / PgDn", "scroll the conversation"),
@@ -557,6 +558,8 @@ class Controller:
                 return v.show_help()
             if key == "n":
                 return self.new_conversation()
+            if key == "d":
+                return self.delete_conversation()
             if key == "q":
                 v.quit = True
                 return
@@ -605,6 +608,20 @@ class Controller:
         text = self.ask_text("new conversation (NAME [topic]): ")
         if text and text.strip():
             self.create(text)
+
+    def delete_conversation(self) -> None:
+        v, m = self.view, self.model
+        room = m.current
+        if room is None:
+            return
+        state = "still OPEN, and its messages, usage and saved summary" if room.open else "its messages, usage and saved summary"
+        if self.ask(f"delete {room.name}? {state} go for good [y/N]") != "y":
+            return
+        m.delete_room()
+        v.text = m.current.draft if m.current else ""
+        v.cursor = len(v.text)
+        v.history_at = None
+        v.scroll.pop(room.name, None)
 
     def switch(self, step: int) -> None:
         self.go(lambda: self.model.move(step))

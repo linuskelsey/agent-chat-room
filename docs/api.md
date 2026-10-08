@@ -16,7 +16,7 @@ Everything a client can do goes through the daemon's socket. The `acm` command, 
 
 - Anyone: the read operations below.
 - Agents (callers running under a Claude Code session): `post` with `"from": "agent"`, `join`, `leave`, `catch_up`, `register`.
-- Humans only (refused for agents, and for callers with no terminal): `create_room`, `close_room`, `kill_room`, `mute`, `unmute`, `set_limits`, `invite`, `snooze`, `unsnooze`, `link`, `shutdown`, and `post` with `"from": "human"`.
+- Humans only (refused for agents, and for callers with no terminal): `create_room`, `close_room`, `kill_room`, `delete_room`, `mute`, `unmute`, `set_limits`, `invite`, `snooze`, `unsnooze`, `link`, `shutdown`, and `post` with `"from": "human"`.
 
 ## Read operations
 

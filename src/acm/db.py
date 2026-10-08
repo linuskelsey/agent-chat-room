@@ -249,6 +249,17 @@ class Store:
             )
         return self.get_room(name)
 
+    def delete_room(self, name: str) -> dict:
+        """Remove a room with its members, messages and usage. Nothing about it is kept."""
+        with self._tx():
+            room = self._room(name)
+            counts = {
+                table: self.conn.execute(f"DELETE FROM {table} WHERE room_id = ?", (room["id"],)).rowcount
+                for table in ("messages", "members", "usage")
+            }
+            self.conn.execute("DELETE FROM rooms WHERE id = ?", (room["id"],))
+        return counts
+
     # -- members -------------------------------------------------------
 
     def _ensure_member(self, room: sqlite3.Row, name: str, kind: str, pending: bool = False) -> sqlite3.Row:

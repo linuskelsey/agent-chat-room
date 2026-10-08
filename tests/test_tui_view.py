@@ -517,6 +517,27 @@ class ControllerTest(unittest.TestCase):
         self.ctl.key("n")
         self.assertEqual(m.selected, "r")
 
+    def test_d_in_the_list_asks_and_a_no_deletes_nothing(self):
+        m = self.setup(answers=["n"])
+        self.view.focus = "list"
+        self.ctl.key("d")
+        self.assertIn("delete r?", self.asked[0])
+        self.assertNotIn("delete_room", self.ops())
+        self.assertEqual(m.selected, "r")
+
+    def test_d_in_the_list_deletes_the_conversation_and_selects_a_neighbour(self):
+        m = self.setup(answers=["y"])
+        m.rooms["s"] = room("s")
+        m.request = lambda op, **kw: (self.calls.append((op, kw)) or ({"export_removed": None} if op == "delete_room" else {"members": [], "messages": [], "decisions": []}))
+        self.view.focus = "list"
+        before = m.order()[0].name
+        m.select(before)
+        self.ctl.key("d")
+        self.assertEqual([c for c in self.calls if c[0] == "delete_room"][0][1]["name"], before)
+        self.assertNotIn(before, m.rooms)
+        self.assertEqual(m.selected, next(iter(m.rooms)))
+        self.assertIn(f"deleted {before}", m.notice)
+
     def test_clicking_a_conversation_selects_it(self):
         m = FakeModel([room("a", last_ts=2), room("b", last_ts=1)])
         m.request = lambda op, **kw: {"members": []} if op == "members" else {"messages": [], "decisions": []}

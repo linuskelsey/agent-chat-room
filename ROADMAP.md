@@ -91,6 +91,7 @@ Delivery to idle sessions underpins everything else.
 ## Phase 5 — Lifecycle and summaries
 
 - [X] `acm close` (creator only) prints the summary to the terminal and writes it as the final system message. `acm kill` and `/close` in the room client do the same.
+- [X] `acm rm <room>` and `d` in the client's list delete a room with its messages, usage and saved summary; an open room needs `--force`.
 - [X] Summary is assembled deterministically, with no model call: pinned decisions, unanswered `@mentions` as open items, files and commits taken from post refs, and how the room ended. A decision an agent pins (for example a summary it was asked to write) is included like any other.
 - [X] Final decision notification to the human on close (terminal output plus desktop notification).
 - [X] The summary and the full transcript are saved to markdown when a room closes, to `export_dir` (per room or in the config file; default `rooms/` in acm's data directory). `acm export <room>` writes the same on demand.
@@ -132,7 +133,7 @@ Delivery to idle sessions underpins everything else.
 - A way for integrations without a terminal (a bar widget posting or closing rooms) to prove they are the human, since human-only actions need a terminal.
 - Remove a member from a room (`acm remove <room> <member>`, `/remove NAME` in the client): they are no longer woken, can no longer see the room under the invited policy, and the room gets a "was removed" line, so an agent that is no longer needed stops costing tokens.
 - Agents leave when their part is done: what agents are told on joining says they may use `room_leave` once finished, with an optional "I'm done" signal the human can confirm.
-- Pruning: delete or archive old rooms (`acm prune --older-than`, `acm rm <room>`), remove members from a room, and rotate the daemon log, so the database and log do not grow forever.
+- Pruning: archive or bulk-delete old rooms (`acm prune --older-than`), remove members from a room, and rotate the daemon log, so the database and log do not grow forever.
 - Moderated rooms: a per-room flag where an agent's post is relayed to the other agents only after the human approves it.
 - Model-written summaries on close, as an opt-in extension of the pinned-decision summary.
 - Room templates (feature, bugfix, review) with preset budgets and roles.

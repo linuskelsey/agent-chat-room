@@ -186,6 +186,22 @@ class TmuxUITest(unittest.TestCase):
         self.send("x")
         self.wait_for("read-only")
 
+    def test_07b_d_in_the_list_deletes_a_conversation_after_asking(self):
+        self.room("doomed")
+        self.say("doomed", "kit", "bye", kind="human")
+        self.start("t07b")
+        self.wait_for("doomed")
+        self.send("d")
+        self.wait_for("delete doomed?")
+        self.send("n")
+        self.assertEqual(self.client.request("get_room", name="doomed")["room"]["status"], "open")
+        self.send("d")
+        self.wait_for("delete doomed?")
+        self.send("y")
+        self.wait_for("deleted doomed")
+        with self.assertRaises(self.client.AcmError):
+            self.client.request("get_room", name="doomed")
+
     def test_08_narrow_terminals_show_one_pane_and_q_quits(self):
         self.room("kappa")
         self.start("t08", cols=50, rows=20)

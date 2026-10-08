@@ -31,6 +31,7 @@
 |---|---|---|
 | Up / Down, j / k | list | move between conversations |
 | n | list | start a new conversation: type `NAME` or `NAME some topic`, then Enter |
+| d | list | delete the selected conversation with its messages, usage and saved summary; asks first |
 | Enter, Tab | list | go to the message box |
 | Esc, Tab | message box | back to the list |
 | Ctrl-N / Ctrl-P | anywhere | next / previous conversation |

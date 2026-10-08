@@ -160,6 +160,9 @@ class Model:
                 elif room.joined:
                     room.unread += 1
             return True
+        if kind == "deleted":
+            self.load_rooms()
+            return True
         if kind == "closed":
             info = ev["room"]
             room.status, room.closed_at = "closed", info.get("closed_at")
@@ -217,6 +220,22 @@ class Model:
         res = self.request("close_room", name=room.name, by=self.me)
         room.status = "closed"
         self.notice = f"closed {room.name}" + (f", saved to {res['exported']}" if res.get("exported") else "")
+        return res
+
+    def delete_room(self) -> dict:
+        """Delete the selected conversation and move the selection to a neighbour."""
+        room = self.current
+        if room is None:
+            raise AcmError("bad_request", "no conversation selected")
+        names = [r.name for r in self.order()]
+        at = names.index(room.name)
+        res = self.request("delete_room", name=room.name, force=room.open)
+        self.rooms.pop(room.name, None)
+        rest = [n for n in names if n != room.name]
+        self.selected = rest[min(at, len(rest) - 1)] if rest else None
+        if self.selected:
+            self.select(self.selected)
+        self.notice = f"deleted {room.name}" + (f", removed {res['export_removed']}" if res.get("export_removed") else "")
         return res
 
     def set_muted(self, member: str, muted: bool) -> None:

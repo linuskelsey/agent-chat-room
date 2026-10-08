@@ -229,6 +229,48 @@ class ModelTest(unittest.TestCase):
                 action()
             self.assertEqual(cm.exception.code, "room_closed")
 
+    def test_11b_deleting_removes_the_room_its_log_and_its_saved_summary(self):
+        r = self.room("tdel", agents=("arx",))
+        self.say(r, "kit", "hello", kind="human")
+        m = self.model()
+        m.select(r)
+        res = m.close_room()
+        saved = res["exported"]
+        self.assertTrue(os.path.exists(saved))
+        m.delete_room()
+        self.assertNotIn(r, m.rooms)
+        self.assertFalse(os.path.exists(saved))
+        self.assertIn("deleted tdel", m.notice)
+        with self.assertRaises(AcmError) as cm:
+            self.client.request("get_room", name=r)
+        self.assertEqual(cm.exception.code, "not_found")
+
+    def test_11c_an_open_room_needs_force_and_a_foreign_file_is_left_alone(self):
+        r = self.room("tdel2")
+        with self.assertRaises(AcmError) as cm:
+            self.client.request("delete_room", name=r)
+        self.assertEqual(cm.exception.code, "room_open")
+        mine = os.path.join(os.environ["ACM_DATA"], "rooms", "tdel2.md")
+        os.makedirs(os.path.dirname(mine), exist_ok=True)
+        with open(mine, "w") as f:
+            f.write("somebody else's notes")
+        res = self.client.request("delete_room", name=r, force=True)
+        self.assertIsNone(res["export_removed"])
+        self.assertTrue(os.path.exists(mine))
+
+    def test_11d_acm_rm_deletes_from_the_command_line(self):
+        r = self.room("tdel3")
+        run = lambda *a: subprocess.run([sys.executable, "-m", "acm", "--as", "kit", *a], capture_output=True, text=True)
+        refused = run("rm", r, "-y")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("still open", refused.stderr)
+        declined = subprocess.run([sys.executable, "-m", "acm", "--as", "kit", "rm", r, "--force"], input="n\n", capture_output=True, text=True)
+        self.assertIn("not deleted", declined.stdout)
+        done = run("rm", r, "-y", "--force")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("deleted tdel3", done.stdout)
+        self.assertNotIn(r, run("ls", "--all").stdout)
+
     def test_12_mute_and_invite_report_back(self):
         r = self.room("tr", agents=("arx",))
         m = self.model()

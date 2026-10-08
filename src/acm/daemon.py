@@ -40,7 +40,7 @@ CACHE_TTL_SECS = 300  # an agent idle for longer than this has probably lost its
 # different way of getting around the one before. None stops a process that works hard to look human
 # (everything runs as the same user), so they guard against accidents and honest mistakes.
 HUMAN_ONLY_OPS = {
-    "create_room", "close_room", "kill_room", "mute", "unmute", "set_limits", "invite", "snooze", "unsnooze", "link",
+    "create_room", "close_room", "kill_room", "delete_room", "mute", "unmute", "set_limits", "invite", "snooze", "unsnooze", "link",
     "shutdown",
 }
 # Set in the environment of anything a Claude Code session starts, and inherited by processes it detaches.
@@ -683,6 +683,29 @@ class Daemon:
         self.agent_turns.pop(name, None)
         return {"room": room, "summary": summary.render(data), "exported": exported, "final_decision": final}
 
+    def _delete(self, req: dict) -> dict:
+        """Delete a room and everything kept about it, including the summary file acm wrote when it closed."""
+        s, name = self.store, _need(req, "name")
+        info = s.get_room(name)
+        if info["status"] == "open" and not req.get("force"):
+            raise AcmError("room_open", f"{name} is still open: close it first, or delete it anyway with force")
+        export = self._export_path(name)  # worked out while the room's own settings still exist
+        self._publish(name, {"event": "deleted"})  # told before the room stops existing, so its watchers can see it
+        counts = s.delete_room(name)
+        removed = None
+        try:
+            if export.is_file() and export.read_text(errors="replace").startswith(f"<!-- acm-room: {name} -->"):
+                export.unlink()  # only a file acm itself wrote for this room
+                removed = str(export)
+        except OSError as e:
+            print(f"[{name}] could not remove {export}: {e}", file=sys.stderr, flush=True)
+        for key in [k for k in self.pending if k[0] == name]:
+            del self.pending[key]
+        for key in [k for k in self.rate if k[0] == name]:
+            del self.rate[key]
+        self.agent_turns.pop(name, None)
+        return {"deleted": name, **counts, "export_removed": removed}
+
     @staticmethod
     def _kind(req: dict, default: str = "human") -> str:
         """The member kind to create. A caller inside a Claude session can only ever be an agent."""
@@ -705,6 +728,8 @@ class Daemon:
             return {"rooms": [r for r in rooms if self.can_see(r["name"], req.get("_names"))]}
         if op in ("close_room", "kill_room"):
             return self._close(op, req)
+        if op == "delete_room":
+            return self._delete(req)
         if op == "summary":
             data = summary.with_ref_notes(summary.build(s, _need(req, "room")))
             return {"summary": summary.render(data), "final_decision": summary.final_decision(data)}

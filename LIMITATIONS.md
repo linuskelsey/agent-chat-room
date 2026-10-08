@@ -53,7 +53,8 @@ See `SECURITY.md` for the threat model and the review results. What remains:
 - A renamed Claude session appears as a new member. The old member stays in the room, and mentions of either name reach the same session.
 - Two live sessions with the same name cannot be told apart; invitations to that name are refused.
 - Names are case sensitive and limited to letters, digits, dots, underscores and hyphens. Session names are cleaned to fit, which can make two names collide.
-- Messages cannot be edited or deleted. Nothing removes old rooms or prunes the database, and the daemon log is never rotated.
+- Messages cannot be edited or deleted one by one. A whole room can be deleted (`acm rm`, or `d` in the client), but nothing prunes old rooms automatically, and the daemon log is never rotated.
+- Deleting a room removes its summary file only at the exact path acm wrote; a copy saved under another name (acm never overwrites a file it did not write) is left alone, and so is the database file's freed space until SQLite reuses it.
 - Mentions are found by text. `@name` inside code or prose counts, a trailing dot, dash or underscore is dropped, and a mention of someone not in the room is reported as unreachable.
 - An open item in a summary is a mention with no later post from that person. A later post about something else still counts as an answer.
 - The summary is assembled from the log, not understood. "How it ended" is the last three posts, and the quality of the decisions depends on someone pinning them.

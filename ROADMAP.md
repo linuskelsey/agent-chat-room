@@ -110,6 +110,9 @@ Delivery to idle sessions underpins everything else.
   - [X] Toggles next to the input that mirror CLI flags: `no_reply_needed` (F2) and pin as decision (F3).
   - [X] Room actions from the client: close (with confirmation), mute and unmute members, member list, add agents, ask one agent for a wrap-up, new room, summary.
   - [X] Built on the public operations and event stream only, so the CLI and the client always behave the same.
+  - [X] Mouse wheel scrolls the conversation (and moves between conversations over the list), alongside PgUp/PgDn; Ctrl-Left and Ctrl-Right move by word.
+  - [X] A woken agent that is stuck on an approval or question in its own window is shown in the list and the title and raises a desktop notification.
+  - [X] Optional `notify_when_quiet`: a desktop notification when an agent has posted, nobody was woken and no agent is still working.
 
 ## Phase 7 — Hardening and packaging
 
@@ -127,6 +130,8 @@ Delivery to idle sessions underpins everything else.
 - Opt-in PIN for human-only actions: set once, asked for on the terminal and checked against a stored hash, so an agent cannot act as the human without being told it. The check must not depend on anything the caller reports about itself (its environment, its parent processes, its terminal), since a caller can strip or fake those; only knowing the PIN counts.
 - `integrations/omarchy/`: bar widget with room count and unread badge; popup listing rooms, recent messages and a one-line input. Built on the public API only. If implemented as a Plugin Hub card: height capped ~400px, closes on outside focus, `hubOpen` gates polling.
 - A way for integrations without a terminal (a bar widget posting or closing rooms) to prove they are the human, since human-only actions need a terminal.
+- Remove a member from a room (`acm remove <room> <member>`, `/remove NAME` in the client): they are no longer woken, can no longer see the room under the invited policy, and the room gets a "was removed" line, so an agent that is no longer needed stops costing tokens.
+- Agents leave when their part is done: what agents are told on joining says they may use `room_leave` once finished, with an optional "I'm done" signal the human can confirm.
 - Pruning: delete or archive old rooms (`acm prune --older-than`, `acm rm <room>`), remove members from a room, and rotate the daemon log, so the database and log do not grow forever.
 - Moderated rooms: a per-room flag where an agent's post is relayed to the other agents only after the human approves it.
 - Model-written summaries on close, as an opt-in extension of the pinned-decision summary.

@@ -22,6 +22,7 @@
 - The right side shows the selected conversation: pinned decisions at the top, then the messages, then the message box.
 - The pane you are working in has a highlighted title bar: the list, or the conversation.
 - Terminals narrower than 70 columns show one pane at a time. The list takes the whole screen until you press Enter.
+- A `!` in the list and a `⚠ NAME waiting for you` in the conversation title mean an agent that was woken is stuck on an approval or question in its own Claude Code window. Go and answer it there. You also get a desktop notification.
 - Messages from other people and agents arrive live. Scroll up with PgUp, and older messages load as you reach the top.
 
 ## Keys
@@ -39,6 +40,7 @@
 | F3 | message box | pin the next message as a decision |
 | F4 | anywhere | show or hide the pinned decisions |
 | Up / Down | message box | recall earlier messages you sent |
+| Ctrl-Left, Ctrl-Right | message box | move by word (Alt-Left and Alt-Right too) |
 | Ctrl-A, Ctrl-E | message box | start / end of the line |
 | Ctrl-U, Ctrl-K, Ctrl-W | message box | clear the line / cut to the end / cut a word |
 | F1, ? | anywhere | help |
@@ -67,9 +69,13 @@ Type these in the message box. Anything else is sent to the room.
 
 A message that would wake agents costing about 100,000 tokens or more (`confirm_wake_tokens`) asks first, on the status line: `y` sends, `n` cancels and keeps your text, `f` sends it as an fyi. The estimate comes from each agent's recent wakes and is higher for an agent whose prompt cache has probably expired. Set `confirm_wake_tokens=0` for a room to stop asking.
 
+## Telling you when it is your turn
+
+A room goes quiet when an agent posts and nobody is woken, which is easy to miss. Set `notify_when_quiet=1` for a room (`acm budget ROOM notify_when_quiet=1`) or for every room in the config file. Once every agent in the room has stopped and nobody has spoken since, you get one desktop notification and a line in the client. It is off by default.
+
 ## Options
 
-- `ACM_MOUSE=1` turns on mouse support: click a conversation, scroll with the wheel. It is off by default because capturing the mouse stops your terminal's own text selection.
+- The mouse works by default: the wheel scrolls the conversation three lines a notch (over the list it moves between conversations) and a click selects a conversation. A mouse-aware program takes the mouse from the terminal, so select text with Shift held (as in vim or tmux), or set `ACM_NO_MOUSE=1` to leave the mouse alone.
 - `ACM_UI_LOG=/path/to/file` writes a timing log: each key as it arrives, each redraw and each request to the daemon, with milliseconds. Use it to find where time goes if the client feels slow.
 - `--as NAME` sets your name, as with every `acm` command. The default is `$ACM_NAME`, then `$USER`.
 

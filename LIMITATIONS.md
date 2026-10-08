@@ -65,7 +65,9 @@ See `SECURITY.md` for the threat model and the review results. What remains:
 - The older line-based room client (`acm room`) is a test client: one line at a time, no scrollback, and the prompt can redraw badly with very long input or after a resize.
 - The terminal client (`acm ui`) has a single-line message box: no multi-line input, no bracketed paste (a pasted newline sends), and no text selection inside it.
 - The terminal client shows at most the last 200 messages of a conversation and loads more a page at a time when you scroll up. It has no in-conversation search.
-- The terminal client does not capture the mouse unless `ACM_MOUSE=1` is set, because capturing it stops the terminal's own copy and paste. Clicking and the wheel only work then.
+- The terminal client captures the mouse so the wheel can scroll, which means selecting text needs Shift held in most terminals. `ACM_NO_MOUSE=1` turns that off.
+- The "waiting for you" alert relies on the `status` field in Claude Code's session records, which is not a documented contract, and only watches agents for the 15 minutes after a wake. An agent blocked on its own, outside a wake, is not reported.
+- `notify_when_quiet` judges a room quiet from the same status field and only after an agent's post that woke nobody; it does not notice a room that went quiet any other way.
 - Function keys (F1 to F4) can be intercepted by some terminals and multiplexers. Every function-key action also has a typed form (`?`, `/fyi`, `/decision`).
 - Alt-key combinations are not supported. An Alt-q is recognised as Esc then q and ignored, but other combinations are not interpreted.
 - The terminal client reorders its list as activity arrives, so the conversation under the cursor can move; it stays selected by name.

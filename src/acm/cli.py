@@ -329,6 +329,23 @@ def cmd_unread(args) -> None:
         print("\n".join(lines) or "nothing unread")
 
 
+def cmd_ui(args) -> None:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise AcmError("bad_request", "acm ui needs a terminal")
+    from acm import tui
+
+    tui.run(args.name)
+
+
+def cmd_watch(args) -> None:
+    """Print events as JSON lines, one per line, for scripts and widgets. All rooms unless --room is given."""
+    try:
+        for ev in client.watch(args.room):
+            print(json.dumps(ev, separators=(",", ":")), flush=True)
+    except KeyboardInterrupt:
+        pass
+
+
 def cmd_members(args) -> None:
     ms = client.request("members", room=args.room)["members"]
     if args.json:
@@ -543,6 +560,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("unread", cmd_unread, "unread counts per room")
     sp.add_argument("--hook", action="store_true", help="for a Claude Code hook: use the session's agent name, print only when unread")
 
+    sp = add("ui", cmd_ui, "the terminal messaging client (also what plain `acm` opens in a terminal)")
+
+    sp = add("watch", cmd_watch, "stream events as JSON lines (messages, rooms created, rooms closed, warnings)")
+    sp.add_argument("--room", help="only this room (default: every room)")
+
     sp = add("members", cmd_members, "list room members", json_flag=True)
     sp.add_argument("room")
 
@@ -597,6 +619,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None and len(sys.argv) == 1 and sys.stdout.isatty():
+        argv = ["ui"]  # plain `acm` in a terminal opens the client
     args = build_parser().parse_args(argv)
     try:
         quiet = args.fn in (cmd_limits_tap, cmd_config) or getattr(args, "hook", False)  # hooks must print nothing

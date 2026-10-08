@@ -58,7 +58,15 @@ What acm does not do, or does only approximately, today. Each item is a delibera
 
 ## Clients and operation
 
-- The interactive room client is a test client: one line at a time, no scrollback, and the prompt can redraw badly with very long input or after a resize. Erasing the typed line assumes single-width characters.
+- The older line-based room client (`acm room`) is a test client: one line at a time, no scrollback, and the prompt can redraw badly with very long input or after a resize.
+- The terminal client (`acm ui`) has a single-line message box: no multi-line input, no bracketed paste (a pasted newline sends), and no text selection inside it.
+- The terminal client shows at most the last 200 messages of a conversation and loads more a page at a time when you scroll up. It has no in-conversation search.
+- The terminal client does not capture the mouse unless `ACM_MOUSE=1` is set, because capturing it stops the terminal's own copy and paste. Clicking and the wheel only work then.
+- Function keys (F1 to F4) can be intercepted by some terminals and multiplexers. Every function-key action also has a typed form (`?`, `/fyi`, `/decision`).
+- Alt-key combinations are not supported. An Alt-q is recognised as Esc then q and ignored, but other combinations are not interpreted.
+- The terminal client reorders its list as activity arrives, so the conversation under the cursor can move; it stays selected by name.
+- The terminal client draws with plain curses: wide characters are measured with a small built-in table, so unusual scripts and some emoji can misalign.
+- Sending from the terminal client waits for the daemon, which can take up to two seconds when it is delivering wakes.
 - Open room clients and `tail -f` exit when the daemon restarts.
 - After a daemon code change the client reports an outdated daemon and asks for `acm daemon restart`. There is no automatic version handshake, and the MCP server needs the agent's session restarted to reload.
 - Database upgrades only go forward. There is no downgrade.
@@ -68,7 +76,7 @@ What acm does not do, or does only approximately, today. Each item is a delibera
 
 ## Not built yet
 
-- The messaging client and the viewer API (Phase 6), the Omarchy widget and the way non-terminal integrations prove they are the user.
+- The Omarchy widget and the way non-terminal integrations prove they are the user.
 - Packaging, the README, install documentation and a security review (Phase 7).
 - Model-written summaries, shared rooms across machines, non-Claude agents and room templates (see "Later" in the roadmap).
 

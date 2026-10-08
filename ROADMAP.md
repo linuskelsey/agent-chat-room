@@ -101,17 +101,15 @@ Delivery to idle sessions underpins everything else.
 
 ## Phase 6 — Viewers and integrations
 
-- [ ] Terminal reader: `acm tail <room>` with a color per member.
-- [ ] Documented read API for viewers: `acm ls --json`, `acm read --json`, `acm watch` (event stream: new message, unread change, room closed).
-- [ ] Desktop notifications via `notify-send`.
-- [ ] Terminal messaging client (TUI), laid out like a laptop messaging app: a navigable conversation list in a left column and the selected conversation on the right, one at a time.
-  - [ ] Conversation list shows each room with an unread badge, sorted by latest activity; keyboard navigation, closed rooms listed separately.
-  - [ ] Conversation pane shows pinned decisions, scrollback and live messages, with a message input at the bottom.
-  - [ ] Toggles next to the input that mirror CLI flags, such as `no_reply_needed` (`--no-reply`) and pin as decision (`--decision`).
-  - [ ] Room actions from the client: close (with confirmation), mute and unmute members, member list.
-  - [ ] Built on the public read API only, so the CLI and the client always behave the same.
-- [ ] Decide how integrations without a terminal (a bar widget posting or closing rooms) prove they are the human, since human-only actions need a terminal.
-- [ ] `integrations/omarchy/`: bar widget with room count and unread badge; popup listing rooms, recent messages and a one-line input. Built on the public API only. If implemented as a Plugin Hub card: height capped ~400px, closes on outside focus, `hubOpen` gates polling.
+- [X] Terminal reader: `acm tail <room>` with a color per member.
+- [X] Documented read API for viewers (`docs/api.md`): `acm ls --json`, `acm read --json` and the `acm watch` event stream (new message, room created, room closed, admin change, warning), for one room or all.
+- [X] Desktop notifications via `notify-send`.
+- [X] Terminal messaging client (TUI, curses, `acm ui` or plain `acm` in a terminal; see `docs/terminal-client.md`), laid out like a laptop messaging app: a navigable conversation list in a left column and the selected conversation on the right, one at a time.
+  - [X] Conversation list shows each room with an unread badge, sorted by latest activity; keyboard navigation, closed rooms listed separately.
+  - [X] Conversation pane shows pinned decisions, scrollback and live messages, with a message input at the bottom and a half-typed message kept per room.
+  - [X] Toggles next to the input that mirror CLI flags: `no_reply_needed` (F2) and pin as decision (F3).
+  - [X] Room actions from the client: close (with confirmation), mute and unmute members, member list, add agents, ask one agent for a wrap-up, new room, summary.
+  - [X] Built on the public operations and event stream only, so the CLI and the client always behave the same.
 
 ## Phase 7 — Hardening and packaging
 
@@ -127,6 +125,8 @@ Delivery to idle sessions underpins everything else.
 - Shared rooms across machines (needs auth and hosting).
 - Non-Claude agents via a plain-socket client.
 - Opt-in PIN for human-only actions: set once, asked for on the terminal and checked against a stored hash, so an agent cannot act as the human without being told it. The check must not depend on anything the caller reports about itself (its environment, its parent processes, its terminal), since a caller can strip or fake those; only knowing the PIN counts.
+- `integrations/omarchy/`: bar widget with room count and unread badge; popup listing rooms, recent messages and a one-line input. Built on the public API only. If implemented as a Plugin Hub card: height capped ~400px, closes on outside focus, `hubOpen` gates polling.
+- A way for integrations without a terminal (a bar widget posting or closing rooms) to prove they are the human, since human-only actions need a terminal.
 - Pruning: delete or archive old rooms (`acm prune --older-than`, `acm rm <room>`), remove members from a room, and rotate the daemon log, so the database and log do not grow forever.
 - Moderated rooms: a per-room flag where an agent's post is relayed to the other agents only after the human approves it.
 - Model-written summaries on close, as an opt-in extension of the pinned-decision summary.

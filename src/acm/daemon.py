@@ -100,6 +100,7 @@ class Daemon:
     def __init__(self, store: Store):
         self.store = store
         self.watchers: dict[str, set[asyncio.Queue]] = {}
+        self.global_watchers: set[asyncio.Queue] = set()  # every room's events, for clients that show all rooms
         self.writers: set[asyncio.StreamWriter] = set()
         self.pending: dict[tuple[str, str], float] = {}  # (room, agent) -> when the outstanding wake was sent
         self.tasks: set[asyncio.Task] = set()
@@ -111,7 +112,10 @@ class Daemon:
         store.on_system = lambda room, msg: self._publish(room, {"event": "message", "message": msg})
 
     def _publish(self, room: str, event: dict) -> None:
+        event = {**event, "room_name": room}
         for q in self.watchers.get(room, ()):
+            q.put_nowait(event)
+        for q in self.global_watchers:
             q.put_nowait(event)
 
     def _spawn(self, coro) -> None:
@@ -448,6 +452,7 @@ class Daemon:
             room = s.set_project_dir(name, pdir)
         if carried:
             s.post_system(name, f"continued from {source}\n\n{carried}")
+        self._publish(name, {"event": "room_created", "room": room})
         return {"room": room}
 
     def _export_path(self, room: str) -> Path:
@@ -522,7 +527,9 @@ class Daemon:
                 int(req.get("limit", 50)), bool(req.get("include_system", False)),
             )}
         if op == "link":
-            return {"room": s.set_project_dir(_need(req, "room"), self._project_dir(req.get("dir")))}
+            room = s.set_project_dir(_need(req, "room"), self._project_dir(req.get("dir")))
+            self._publish(room["name"], {"event": "room_updated", "what": "link"})
+            return {"room": room}
         if op == "join":
             return {"member": s.join(_need(req, "room"), _need(req, "member"), self._kind(req))}
         if op == "leave":
@@ -530,6 +537,7 @@ class Daemon:
             return {}
         if op in ("mute", "unmute"):
             s.set_muted(_need(req, "room"), _need(req, "member"), op == "mute")
+            self._publish(req["room"], {"event": "room_updated", "what": op})
             return {}
         if op == "members":
             return {"members": list(s.members(_need(req, "room")).values())}
@@ -539,7 +547,9 @@ class Daemon:
             s.unsnooze(_need(req, "name"))
             return {}
         if op == "set_limits":
-            return {"limits": s.set_limits(_need(req, "room"), _need(req, "updates"))}
+            limits = s.set_limits(_need(req, "room"), _need(req, "updates"))
+            self._publish(req["room"], {"event": "room_updated", "what": "limits"})
+            return {"limits": limits}
         if op == "register":
             s.register_agent(_need(req, "name"), _need(req, "pid"), _need(req, "inbox"))
             return {}
@@ -570,9 +580,10 @@ class Daemon:
         await writer.drain()
 
     async def _watch(self, req: dict, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        room = self.store.get_room(_need(req, "room"))["name"]
+        everywhere = req.get("op") == "watch_all"
+        room = "*" if everywhere else self.store.get_room(_need(req, "room"))["name"]
         q: asyncio.Queue = asyncio.Queue()
-        self.watchers.setdefault(room, set()).add(q)
+        (self.global_watchers if everywhere else self.watchers.setdefault(room, set())).add(q)
         eof = asyncio.ensure_future(reader.read(1))
         try:
             await self._send(writer, {"ok": True, "watching": room})
@@ -587,7 +598,7 @@ class Daemon:
             return  # the watcher went away
         finally:
             eof.cancel()
-            self.watchers[room].discard(q)
+            (self.global_watchers if everywhere else self.watchers[room]).discard(q)
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.writers.add(writer)
@@ -601,7 +612,7 @@ class Daemon:
                     guard(req, peer)
                     if peer["in_session"] or peer["marked"]:
                         req["_agentish"] = True
-                    if req.get("op") == "watch":
+                    if req.get("op") in ("watch", "watch_all"):
                         await self._watch(req, reader, writer)
                         return
                     resp = {"ok": True, **await self.dispatch_async(req)}

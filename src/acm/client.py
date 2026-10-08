@@ -119,12 +119,14 @@ class Watch:
                 pass
 
 
-def watch(room: str) -> Watch:
-    """Subscribe to a room. The subscription is live as soon as this returns, so callers can fetch
+def watch(room: str | None = None) -> Watch:
+    """Subscribe to one room's events, or to every room's when `room` is None. Closed rooms and new rooms
+    appear in the all-rooms stream. The subscription is live as soon as this returns, so callers can fetch
     history afterwards without missing messages that arrive in between (dedupe by message id)."""
     s = connect()
     try:
-        s.sendall(json.dumps({"op": "watch", "room": room}).encode() + b"\n")
+        request = {"op": "watch", "room": room} if room else {"op": "watch_all"}
+        s.sendall(json.dumps(request).encode() + b"\n")
         f = s.makefile("rb")
         _raise_if_error(json.loads(f.readline() or b'{"ok":false}'))
     except BaseException:

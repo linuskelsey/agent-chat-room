@@ -206,7 +206,8 @@ class Store:
                    (SELECT MAX(ts) FROM messages g WHERE g.room_id = r.id) AS last_ts,
                    (SELECT COUNT(*) FROM messages g, members m
                      WHERE g.room_id = r.id AND m.room_id = r.id AND m.name = :member
-                       AND g.id > m.cursor AND g.author != :member AND g.kind != 'system') AS unread
+                       AND g.id > m.cursor AND g.author != :member AND g.kind != 'system') AS unread,
+                   EXISTS(SELECT 1 FROM members m WHERE m.room_id = r.id AND m.name = :member) AS is_member
               FROM rooms r
              WHERE (:status IS NULL OR r.status = :status)
              ORDER BY r.id
@@ -216,7 +217,10 @@ class Store:
         out = []
         for row in rows:
             room = self.get_room(row["name"])
-            room.update(members=row["members"], messages=row["messages"], last_ts=row["last_ts"], unread=row["unread"])
+            room.update(
+                members=row["members"], messages=row["messages"], last_ts=row["last_ts"], unread=row["unread"],
+                member=bool(row["is_member"]),
+            )
             out.append(room)
         return out
 

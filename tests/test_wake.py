@@ -15,7 +15,8 @@ SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 class FakeSession:
     """Stands in for a Claude Code session: an inbox socket plus the record Claude Code writes for it."""
 
-    def __init__(self, root, claude_dir, pid, status="idle", name=None, session_id=None):
+    def __init__(self, root, claude_dir, pid, status="idle", name=None, session_id=None, react_on_receipt=False):
+        self.react_on_receipt = react_on_receipt
         self.pid = pid
         self.name = name
         self.session_id = session_id
@@ -52,6 +53,8 @@ class FakeSession:
                 data = b""
                 while chunk := conn.recv(4096):
                     data += chunk
+            if self.react_on_receipt:
+                self.write_record("busy", int(time.time() * 1000))  # a fast session: busy before delivery returns
             for line in data.splitlines():
                 self.lines.append(json.loads(line))
 
@@ -259,6 +262,19 @@ class WakeTest(unittest.TestCase):
         self.assertIn("mig did not react", ev["text"])
         self.assertIn("crossSessionInbound", ev["text"])
         w.close()
+
+    def test_08b_a_session_that_reacts_instantly_is_not_flagged(self):
+        sess = FakeSession(self.tmp.name, os.environ["CLAUDE_CONFIG_DIR"], 950001, react_on_receipt=True)
+        self.addCleanup(sess.close)
+        self.client.request("register", name="fast", pid=sess.pid, inbox=sess.path)
+        r = self.room("w8b", agents=("fast",))
+        w = self.client.watch(r)
+        self.addCleanup(w.close)
+        w._sock.settimeout(2.5)
+        self.post(r, "kit", "@fast ping")
+        self.assertEqual(next(w)["event"], "message")
+        with self.assertRaises(TimeoutError):  # no "did not react" warning follows
+            next(w)
 
     def test_09_a_confirmed_wake_raises_no_warning(self):
         r = self.room("w9", agents=("sys",))

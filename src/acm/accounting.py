@@ -21,8 +21,8 @@ def size(path: Path | None) -> int:
         return 0
 
 
-def usage_since(path: Path | None, offset: int) -> dict:
-    """Token usage of assistant turns written after byte `offset`.
+def usage_since(path: Path | None, offset: int, end: int | None = None) -> dict:
+    """Token usage of assistant turns written between byte `offset` and `end` (default: the end of the file).
 
     A streamed turn is written as several lines that repeat the same usage block, so lines are
     deduplicated by (message id, request id) keeping the largest output count.
@@ -33,7 +33,7 @@ def usage_since(path: Path | None, offset: int) -> dict:
     try:
         with open(path, "rb") as f:
             f.seek(offset)
-            data = f.read()
+            data = f.read() if end is None else f.read(max(0, end - offset))
     except OSError:
         return totals
     turns: dict[tuple, dict] = {}

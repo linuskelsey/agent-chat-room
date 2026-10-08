@@ -163,6 +163,18 @@ class StoreTest(unittest.TestCase):
         self.s.post("feat", "ann", "real message")
         self.assertEqual(self.s.unread_count("feat", "arx"), 1)
 
+    def test_wake_cost_separates_cold_and_warm_wakes(self):
+        self.assertEqual(self.s.wake_cost("arx"), {"warm": 25000.0, "cold": 90000.0, "n": 0})  # nothing known yet
+        self.s.add_usage("feat", "arx", "wake", 10, 90, 0, 1000)  # warm: 200
+        self.s.add_usage("feat", "arx", "wake", 10, 190, 0, 1000)  # warm: 300
+        self.s.add_usage("feat", "arx", "wake", 0, 0, 80000, 0)  # cold (it wrote its whole context to the cache)
+        self.s.add_usage("feat", "arx", "post", 0, 50, 0, 0)  # posts are not wakes
+        cost = self.s.wake_cost("arx")
+        self.assertEqual((cost["warm"], cost["cold"], cost["n"]), (250.0, 80000.0, 3))
+        self.s.catch_up("feat", "arx")
+        self.assertEqual(self.s.members("feat")["arx"]["wake_cost"]["n"], 3)
+        self.assertIsNone(self.s.members("feat")["ann"]["wake_cost"])  # humans have none
+
     def test_limits_layering_and_validation(self):
         import tempfile, os
         from unittest import mock

@@ -8,6 +8,7 @@ into a status-line command, writes them to a small file that the daemon reads.
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 
 from acm import accounting, config, identity, paths
@@ -42,14 +43,66 @@ def write_from_statusline(raw: str) -> bool:
     return True
 
 
-def current() -> dict:
-    """The windows that are still open: {'five_hour': {...}, 'seven_day': {...}}, possibly empty."""
+def _omarchy_cache_path() -> Path | None:
+    """Omarchy's agent-usage widget keeps the account limits in a cache file. Empty setting turns this source off."""
+    override = os.environ.get("ACM_OMARCHY_USAGE_CACHE")
+    if override is not None:
+        return Path(override) if override else None
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / "omarchy" / "agent-usage" / "claude-limits.json"
+
+
+def _from_status_line() -> dict:
     try:
         data = json.loads(limits_file().read_text())
     except (OSError, ValueError):
         return {}
+    stamp = data.get("updated_at") or 0
+    return {
+        k: {**v, "as_of": stamp, "source": "status line"}
+        for k, v in data.items() if k in WINDOWS and isinstance(v, dict)
+    }
+
+
+def _from_omarchy() -> dict:
+    """Read the Omarchy widget's cache if it exists. Its percentages are fractions (0.35 means 35%)."""
+    path = _omarchy_cache_path()
+    if path is None:
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        stamp = float(data["fetchedAtMs"]) / 1000
+        entries = data["limits"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    out = {}
+    for e in entries if isinstance(entries, list) else []:
+        label = str(e.get("label", "")) if isinstance(e, dict) else ""
+        key = "five_hour" if "5-hour" in label else "seven_day" if "7-day" in label else None
+        try:
+            resets = datetime.fromisoformat(e["resetsAt"]).timestamp()
+            used = float(e["percent"]) * 100
+        except (KeyError, ValueError, TypeError):
+            continue
+        if key and key not in out:
+            out[key] = {"used_percentage": used, "resets_at": resets, "as_of": stamp, "source": "Omarchy usage cache"}
+    return out
+
+
+def current() -> dict:
+    """The usage-limit windows that are still open, each from whichever source reported it most recently.
+
+    Sources: the status-line tap (`acm limits-tap`) and, when present, Omarchy's usage cache.
+    """
     now = time.time()
-    return {k: v for k, v in data.items() if k in WINDOWS and isinstance(v, dict) and v.get("resets_at", 0) > now}
+    best: dict = {}
+    for source in (_from_status_line(), _from_omarchy()):
+        for key, w in source.items():
+            if not isinstance(w.get("resets_at"), (int, float)) or w["resets_at"] <= now:
+                continue
+            if key not in best or w["as_of"] > best[key]["as_of"]:
+                best[key] = w
+    return best
 
 
 def _until(epoch: float) -> str:

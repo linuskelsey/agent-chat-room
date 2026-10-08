@@ -82,18 +82,22 @@ Delivery to idle sessions underpins everything else.
 - [X] Kill switch: `acm kill <room>`, mute member, close.
 - [X] Human-only actions (create, close, kill, mute, change limits, invite, snooze, human-flagged posts) are refused for a caller that runs inside a Claude Code session, carries a session's environment variables (which a detached child inherits), or has no controlling terminal. A process that fakes both a terminal and a clean environment is not stopped, since everything runs as the same user.
 - [X] Wake payload is a pointer plus unread count, not full history. The exception is a human's message: a mentioned agent's wake carries its text (up to 500 characters), so it can answer without a read. Agent text is never copied into another agent's prompt, and `inline_human=0` switches this off.
+- [X] Cost preview: before the room client sends a message that would wake agents costing over `confirm_wake_tokens` (default 100,000), it shows who would be woken and the estimate (from each agent's recent wakes, higher if its cache has probably expired) and asks to send, cancel, or send as an fyi. `acm post --dry-run` shows the same without posting, and `acm members` shows each agent's usual wake cost.
+- [X] An agent woken for several rooms at once is charged once per span of work: a new wake ends the previous wake's token count where it starts.
 - [X] Per-agent snooze: `acm snooze <agent> [30m|2h|off]` holds room wakes for that agent in every room while messages keep collecting.
 - [X] Agent instructions say to reply only in the room an agent was woken from and never repeat one room's content in another.
 - Exit: a deliberately looping pair of test agents is stopped by the daemon.
 
 ## Phase 5 — Lifecycle and summaries
 
-- [ ] `acm close` (creator only) prints the summary to the terminal and writes it as the final system message.
-- [ ] Summary is assembled deterministically, with no model call: pinned decisions, unanswered `@mentions` as open items, and files and commits taken from post refs.
-- [ ] Final decision notification to the human on close (terminal output plus desktop notification).
-- [ ] Summary exported to markdown in a configurable directory.
-- [ ] Closed rooms are read-only, archived and searchable.
-- [ ] Optional link from a room to a project directory/repo for relative refs.
+- [X] `acm close` (creator only) prints the summary to the terminal and writes it as the final system message. `acm kill` and `/close` in the room client do the same.
+- [X] Summary is assembled deterministically, with no model call: pinned decisions, unanswered `@mentions` as open items, files and commits taken from post refs, and how the room ended. A decision an agent pins (for example a summary it was asked to write) is included like any other.
+- [X] Final decision notification to the human on close (terminal output plus desktop notification).
+- [X] The summary and the full transcript are saved to markdown when a room closes, to `export_dir` (per room or in the config file; default `rooms/` in acm's data directory). `acm export <room>` writes the same on demand.
+- [X] Closed rooms are read-only, archived and searchable: `acm ls --closed`, `acm summary <room>`, and `acm search <text>` across all rooms.
+- [X] Optional link from a room to a project directory (`--dir`, `acm link`): commits in refs show their subject and missing files are flagged.
+- [X] `acm wrapup <room> <agent>` (and `/wrapup <agent>` in the room client) asks exactly one named agent to pin a summary decision; there is no form that asks everyone.
+- [X] `acm new <room> --continue <old-room>` seeds a new room with the old room's summary and project link.
 
 ## Phase 6 — Viewers and integrations
 
@@ -122,7 +126,8 @@ Delivery to idle sessions underpins everything else.
 
 - Shared rooms across machines (needs auth and hosting).
 - Non-Claude agents via a plain-socket client.
-- Opt-in PIN for human-only actions: set once, asked for on the terminal and checked against a stored hash, so an agent cannot act as the human without being told it.
+- Opt-in PIN for human-only actions: set once, asked for on the terminal and checked against a stored hash, so an agent cannot act as the human without being told it. The check must not depend on anything the caller reports about itself (its environment, its parent processes, its terminal), since a caller can strip or fake those; only knowing the PIN counts.
+- Pruning: delete or archive old rooms (`acm prune --older-than`, `acm rm <room>`), remove members from a room, and rotate the daemon log, so the database and log do not grow forever.
 - Moderated rooms: a per-room flag where an agent's post is relayed to the other agents only after the human approves it.
 - Model-written summaries on close, as an opt-in extension of the pinned-decision summary.
 - Room templates (feature, bugfix, review) with preset budgets and roles.

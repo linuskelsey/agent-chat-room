@@ -54,8 +54,12 @@ def _settings(pairs: list[str]) -> dict:
 
 
 def cmd_new(args) -> None:
-    r = client.request("create_room", name=args.room, by=args.name, topic=args.topic)["room"]
+    r = client.request(
+        "create_room", name=args.room, by=args.name, topic=args.topic, dir=args.dir, continue_from=args.continue_from
+    )["room"]
     print(f"created room {r['name']}" + (f" - {r['topic']}" if r["topic"] else ""))
+    if args.continue_from:
+        print(f"seeded with the summary of {args.continue_from}")
     if args.limit:
         client.request("set_limits", room=args.room, updates=_settings(args.limit))
     _invite(r["name"], args.name, _names(args.add))
@@ -73,11 +77,14 @@ def cmd_budget(args) -> None:
         cap_text = f"/ {cap:g}" if cap else "/ no cap"
         print(f"  {label:<9} {value:>8.0f} {cap_text}{extra}")
 
+    if any(k.split("=")[0] in ("pause_session_pct", "pause_week_pct", "room_share_pct") for k in args.settings) and not usagelimits.current():
+        print("note: acm cannot see your usage limits yet, so these settings do nothing. Run `acm statusline install`.")
     print(f"room {args.room}")
     line("messages", used["max_messages"], lim["max_messages"])
     line("minutes", used["max_minutes"], lim["max_minutes"])
     line("tokens", used["max_tokens"], lim["max_tokens"], f"  (agents {usage['wake']}, posts {usage['post']})")
     print(f"  style {lim['style']} (target {config.target_chars(lim)} chars), rate {lim['agent_rate_per_min']}/min, cooldown {lim['cooldown_turns']} turns")
+    print(f"  summary on close: {lim['export_dir'] or paths.data_dir() / 'rooms'}/{args.room}.md" + ("" if lim["export_dir"] else " (default)"))
     for key in ("pause_session_pct", "pause_week_pct", "room_share_pct"):
         if lim[key] is not None:
             print(f"  {key} {lim[key]:g}")
@@ -114,23 +121,73 @@ def cmd_snooze(args) -> None:
     print(f"{args.agent} will not be woken by rooms until {time.strftime('%H:%M', time.localtime(until))}")
 
 
+def cmd_config(args) -> None:
+    if args.action == "path":
+        print(config.config_path())
+    elif args.action == "init":
+        path = config.write_example(force=args.force)
+        if path is None:
+            raise AcmError("exists", f"{config.config_path()} exists already (use --force to replace it)")
+        print(f"wrote {path}")
+    else:
+        for key, value, source in config.describe():
+            print(f"{key} = {'off' if value is None else value}  ({source})")
+        print(f"\nconfig file: {config.config_path()}" + ("" if config.config_path().exists() else " (not created yet)"))
+
+
 def cmd_limits(args) -> None:
     now = usagelimits.current()
     if not now:
-        print(f"no usage-limit data in {usagelimits.limits_file()}; chain `acm limits-tap` into your status line")
+        print(
+            "no usage-limit data yet. Run `acm statusline install` (one reversible step), or acm reads Omarchy's "
+            "usage cache automatically if you have it"
+        )
         return
     for key, label in (("five_hour", "5-hour"), ("seven_day", "7-day")):
         if key in now:
             w = now[key]
-            print(f"{label}: {w['used_percentage']:.0f}% used, resets {time.strftime('%a %H:%M', time.localtime(w['resets_at']))}")
+            age = max(0, time.time() - w["as_of"])
+            ago = f"{age / 60:.0f} min ago" if age >= 90 else "just now"
+            print(
+                f"{label}: {w['used_percentage']:.0f}% used, resets {time.strftime('%a %H:%M', time.localtime(w['resets_at']))}"
+                f"  ({w['source']}, {ago})"
+            )
 
 
 def cmd_limits_tap(args) -> None:
-    """Read a status-line JSON from stdin and keep its rate limits for the daemon. Silent, never fails."""
+    """Read a status-line JSON from stdin and keep its rate limits for the daemon. Silent unless --show, never fails."""
     try:
         usagelimits.write_from_statusline(sys.stdin.read())
+        if args.show:
+            now = usagelimits.current()
+            parts = [f"{label} {now[k]['used_percentage']:.0f}%" for k, label in (("five_hour", "5h"), ("seven_day", "7d")) if k in now]
+            print(" · ".join(parts))
     except Exception:
         pass
+
+
+def cmd_statusline(args) -> None:
+    from acm import daemon, statusline
+
+    if args.action == "status":
+        print(statusline.status())
+        return
+    peer = daemon.describe_peer(os.getpid())
+    if peer["in_session"] or peer["marked"]:
+        raise AcmError("human_only", "refused: this changes your Claude Code settings, so it must be run by you in a terminal, not inside a session")
+    if args.action == "uninstall":
+        print(statusline.uninstall(force=args.force))
+        return
+    current, new = statusline.plan()
+    print(f"settings file: {statusline.settings_path()}")
+    print(f"now:  {(current or {}).get('command', '(no status line)')}")
+    print(f"new:  {new['command']}")
+    print("Your status line keeps working unchanged; acm also gets the usage figures. Undo with `acm statusline uninstall`.")
+    if not args.yes and input("apply? [y/N] ").strip().lower() not in ("y", "yes"):
+        print("not changed")
+        return
+    backup = statusline.install()
+    print(f"done. Your settings were backed up to {backup}. Takes effect in sessions started from now on.")
 
 
 def cmd_invite(args) -> None:
@@ -138,7 +195,8 @@ def cmd_invite(args) -> None:
 
 
 def cmd_ls(args) -> None:
-    rooms = client.request("list_rooms", status=None if args.all else "open", member=args.name)["rooms"]
+    status = "closed" if args.closed else (None if args.all else "open")
+    rooms = client.request("list_rooms", status=status, member=args.name)["rooms"]
     if args.json:
         return _dump(rooms)
     if not rooms:
@@ -155,6 +213,26 @@ def cmd_ls(args) -> None:
 
 
 def cmd_post(args) -> None:
+    if args.dry_run:
+        pre = client.request(
+            "wake_preview", room=args.room, author=args.name, body=_body(args), no_reply_needed=args.no_reply,
+            **{"from": "human"},
+        )
+        if pre["passive"]:
+            print("nobody would be woken: marked no reply needed")
+        for w in pre["wakes"]:
+            print(f"would wake {w['name']}: about {w['tokens']:,} tokens" + (" (cold: its cache has probably expired)" if w["cold"] else ""))
+        if pre["wakes"]:
+            print(f"total about {pre['total']:,} weighted tokens")
+        if pre["suppressed"]:
+            print("nobody would be woken: " + pre["suppressed"])
+        for who in pre["unreachable"]:
+            print(f"not reached: {who}")
+        if pre["already_pending"]:
+            print("already notified: " + ", ".join(pre["already_pending"]))
+        if pre["notified"]:
+            print("would notify: " + ", ".join(pre["notified"]))
+        return
     kind = "decision" if args.decision else "post"
     msg = client.request(
         "post",
@@ -257,6 +335,7 @@ def cmd_members(args) -> None:
         return _dump(ms)
     for m in ms:
         print(f"{m['name']}  {m['kind']}" + ("  [muted]" if m["muted"] else "") + (f"  strikes {m['strikes']}" if m["strikes"] else "") + ("  (invited, not joined yet)" if not m["joined"] else "")
+              + (f"  (wakes cost about {m['wake_cost']['warm'] / 1000:.0f}k, {m['wake_cost']['cold'] / 1000:.0f}k if cold)" if m["wake_cost"] and m["wake_cost"]["n"] else "")
               + (f"  (snoozed until {time.strftime('%H:%M', time.localtime(m['snoozed_until']))})" if m["snoozed_until"] else ""))
 
 
@@ -265,14 +344,73 @@ def cmd_mute(args) -> None:
     print(f"{'unmuted' if args.unmute else 'muted'} {args.member} in {args.room}")
 
 
+def _show_closed(res: dict, verb: str, room: str) -> None:
+    print(f"{verb} {room}\n")
+    print(res["summary"])
+    if res["exported"]:
+        print(f"\nsaved to {res['exported']}")
+
+
 def cmd_close(args) -> None:
-    client.request("close_room", name=args.room, by=args.name)
-    print(f"closed {args.room}")
+    _show_closed(client.request("close_room", name=args.room, by=args.name), "closed", args.room)
 
 
 def cmd_kill(args) -> None:
-    client.request("kill_room", name=args.room, by=args.name)
-    print(f"killed {args.room}")
+    _show_closed(client.request("kill_room", name=args.room, by=args.name), "killed", args.room)
+
+
+def cmd_summary(args) -> None:
+    print(client.request("summary", room=args.room)["summary"])
+
+
+def cmd_export(args) -> None:
+    text = client.request("export", room=args.room, summary_only=args.summary_only)["text"]
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(text)
+        print(f"wrote {args.output}")
+    else:
+        sys.stdout.write(text)
+
+
+def cmd_search(args) -> None:
+    res = client.request(
+        "search", query=" ".join(args.text), room=args.room, author=args.author,
+        status="closed" if args.closed else None, limit=args.limit, include_system=args.system,
+    )["matches"]
+    if args.json:
+        return _dump(res)
+    if not res:
+        print("no matches")
+        return
+    needle = " ".join(args.text).lower()
+    for m in res:
+        body = " ".join(m["body"].split())
+        at = max(0, body.lower().find(needle) - 40)
+        snippet = ("…" if at else "") + body[at : at + 120] + ("…" if len(body) > at + 120 else "")
+        closed = " [closed]" if m["room_status"] == "closed" else ""
+        print(f"{m['room']}{closed} #{m['id']} {time.strftime('%Y-%m-%d %H:%M', time.localtime(m['ts']))} {m['author']}: {snippet}")
+
+
+def cmd_wrapup(args) -> None:
+    """Ask one named agent to pin a summary decision. Deliberately never addresses everyone."""
+    from acm import summary
+
+    text = summary.wrapup_request(args.agent)
+    pre = client.request("wake_preview", room=args.room, author=args.name, body=text, **{"from": "human"})
+    if args.dry_run:
+        for w in pre["wakes"]:
+            print(f"would wake {w['name']}: about {w['tokens']:,} tokens" + (" (cold)" if w["cold"] else ""))
+        for who in pre["unreachable"]:
+            print(f"not reached: {who}")
+        return
+    msg = client.request("post", room=args.room, author=args.name, body=text, **{"from": "human"})
+    print(f"asked {args.agent} to pin a summary" + _wake_note(msg["wake"]))
+
+
+def cmd_link(args) -> None:
+    room = client.request("link", room=args.room, dir=args.directory)["room"]
+    print(f"{args.room} is linked to {room['project_dir']}" if room["project_dir"] else f"{args.room} is unlinked")
 
 
 def cmd_daemon(args) -> None:
@@ -318,8 +456,11 @@ def cmd_room(args) -> None:
 
     if args.create:
         try:
-            client.request("create_room", name=args.room, by=args.name, topic=args.topic)
-            print(f"created room {args.room}")
+            client.request(
+                "create_room", name=args.room, by=args.name, topic=args.topic, dir=args.dir,
+                continue_from=args.continue_from,
+            )
+            print(f"created room {args.room}" + (f" (continuing {args.continue_from})" if args.continue_from else ""))
             if args.limit:
                 client.request("set_limits", room=args.room, updates=_settings(args.limit))
         except AcmError as e:
@@ -348,6 +489,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-t", "--topic", default="")
     sp.add_argument("--add", action="append", default=[], metavar="AGENT", help="add an agent by session name (repeatable or comma separated)")
     sp.add_argument("-L", "--limit", action="append", default=[], metavar="KEY=VALUE", help="set a room limit, e.g. max_messages=100 (repeatable)")
+    sp.add_argument("--dir", metavar="PATH", help="link the room to a project directory (resolves refs in the summary)")
+    sp.add_argument("--continue", dest="continue_from", metavar="ROOM", help="seed the room with another room's summary")
 
     sp = add("budget", cmd_budget, "show a room's limits and usage, or change limits with KEY=VALUE", json_flag=True)
     sp.add_argument("room")
@@ -357,8 +500,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("agent")
     sp.add_argument("duration", nargs="?", default="1h", help="30m, 2h, 1d, or off (default 1h)")
 
+    sp = add("config", cmd_config, "the global config file: path, init (write a commented example), show")
+    sp.add_argument("action", choices=["path", "init", "show"])
+    sp.add_argument("--force", action="store_true", help="init: replace an existing file")
+
     sp = add("limits", cmd_limits, "show the account usage limits the daemon can see")
     sp = add("limits-tap", cmd_limits_tap, "status-line helper: read status-line JSON on stdin and keep its rate limits")
+    sp.add_argument("--show", action="store_true", help="also print a short usage line, for use as the whole status line")
+
+    sp = add("statusline", cmd_statusline, "let acm see your usage limits: install/uninstall its tap in your Claude Code status line")
+    sp.add_argument("action", choices=["install", "uninstall", "status"])
+    sp.add_argument("-y", "--yes", action="store_true", help="install without asking")
+    sp.add_argument("--force", action="store_true", help="uninstall even if the status line was changed since")
 
     sp = add("invite", cmd_invite, "add agents to an open room and tell them to join")
     sp.add_argument("room")
@@ -366,6 +519,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add("ls", cmd_ls, "list rooms", json_flag=True)
     sp.add_argument("-a", "--all", action="store_true", help="include closed rooms")
+    sp.add_argument("--closed", action="store_true", help="only closed rooms")
 
     sp = add("post", cmd_post, "post a message (text args, or stdin)")
     sp.add_argument("room")
@@ -373,6 +527,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-d", "--decision", action="store_true", help="pin as a decision")
     sp.add_argument("--ref", action="append", default=[], help="file path or commit SHA (repeatable)")
     sp.add_argument("--no-reply", action="store_true", help="mark as needing no reply")
+    sp.add_argument("--dry-run", action="store_true", help="show who would be woken and the estimated cost, without posting")
 
     sp = add("read", cmd_read, "read new messages (advances your cursor)", json_flag=True)
     sp.add_argument("room")
@@ -396,7 +551,32 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("member")
     sp.add_argument("--unmute", action="store_true")
 
-    sp = add("close", cmd_close, "close a room (creator only)")
+    sp = add("summary", cmd_summary, "print a room's summary (decisions, open items, files, how it ended)")
+    sp.add_argument("room")
+
+    sp = add("export", cmd_export, "write a room as markdown: summary plus the full transcript")
+    sp.add_argument("room")
+    sp.add_argument("-o", "--output", metavar="FILE")
+    sp.add_argument("--summary-only", action="store_true")
+
+    sp = add("search", cmd_search, "find messages across rooms, closed ones included", json_flag=True)
+    sp.add_argument("text", nargs="+")
+    sp.add_argument("--room")
+    sp.add_argument("--author")
+    sp.add_argument("--closed", action="store_true", help="only closed rooms")
+    sp.add_argument("--system", action="store_true", help="include join/close lines")
+    sp.add_argument("-n", "--limit", type=int, default=20)
+
+    sp = add("wrapup", cmd_wrapup, "ask ONE agent to pin a summary decision before you close the room")
+    sp.add_argument("room")
+    sp.add_argument("agent")
+    sp.add_argument("--dry-run", action="store_true", help="show the estimated cost without asking")
+
+    sp = add("link", cmd_link, "link a room to a project directory, or 'none' to unlink")
+    sp.add_argument("room")
+    sp.add_argument("directory")
+
+    sp = add("close", cmd_close, "close a room (creator only) and print its summary")
     sp.add_argument("room")
 
     sp = add("kill", cmd_kill, "force-close a room, whoever created it")
@@ -410,6 +590,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-c", "--create", action="store_true", help="create the room first if it does not exist")
     sp.add_argument("-t", "--topic", default="", help="topic for a room created with -c")
     sp.add_argument("-L", "--limit", action="append", default=[], metavar="KEY=VALUE", help="limits for a room created with -c, e.g. max_messages=100")
+    sp.add_argument("--dir", metavar="PATH", help="project directory for a room created with -c")
+    sp.add_argument("--continue", dest="continue_from", metavar="ROOM", help="seed a room created with -c with another room's summary")
     sp.add_argument("--add", action="append", default=[], metavar="AGENT", help="add an agent by session name (repeatable or comma separated)")
     return p
 
@@ -417,6 +599,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        quiet = args.fn in (cmd_limits_tap, cmd_config) or getattr(args, "hook", False)  # hooks must print nothing
+        if not quiet and (created := config.ensure_example()):
+            print(f"acm: wrote an example config (all commented out) to {created}", file=sys.stderr)
         args.fn(args)
     except AcmError as e:
         print(f"acm: {e.message}", file=sys.stderr)

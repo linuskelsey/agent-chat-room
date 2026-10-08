@@ -149,7 +149,7 @@ async def notify_desktop(title: str, body: str) -> bool:
 def confirmed(store: Store, room: str, name: str, sent_at: float, before_cursor: int) -> bool:
     """Did the woken session react? It went busy/idle after the wake, or it read the room."""
     state = session_state(store, name)
-    if state is not None and state["status_at"] / 1000 >= sent_at:
+    if state is not None and state["status_at"] / 1000 >= sent_at - 1:  # a second of clock slack
         return True
     return store.cursor_of(room, name) > before_cursor
 

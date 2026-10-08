@@ -18,6 +18,7 @@ HELP = """\
   text            post to the room
   /add NAME...    add agents (by session name) and tell them to join
   /fyi TEXT       post without waking anyone (no reply needed), even with @mentions
+  /wrapup AGENT   ask that one agent to pin a summary decision (never everyone)
   /decision TEXT  post and pin a decision
   /members        list members
   /mute NAME      mute a member (/unmute NAME to undo)
@@ -103,8 +104,19 @@ def _input_loop(room: str, name: str, printer: Printer, done: threading.Event) -
         line = raw.strip()
         if done.is_set() or not line:
             continue
+        fyi = False
         if not line.startswith(("!", "/")):
-            _erase_typed(raw)  # the room echoes the message back with a timestamp, don't show it twice
+            try:
+                answer = _confirm_cost(room, name, line)
+            except AcmError as e:
+                printer.out(f"! {e.message}")
+                continue
+            if answer == "cancel":
+                print("not sent")
+                continue
+            fyi = answer == "fyi"
+            if answer == "sent-as-is":
+                _erase_typed(raw)  # the room echoes the message back with a timestamp, don't show it twice
         try:
             if line.startswith("!"):
                 subprocess.run(line[1:], shell=True)
@@ -112,11 +124,27 @@ def _input_loop(room: str, name: str, printer: Printer, done: threading.Event) -
                 if _command(line, room, name):
                     return
             else:
-                res = client.request("post", room=room, author=name, body=line, **{"from": "human"})
+                res = client.request(
+                    "post", room=room, author=name, body=line, no_reply_needed=fyi, **{"from": "human"}
+                )
                 for who in res["wake"]["unreachable"]:
                     printer.out(f"! not reached: {who}")
         except AcmError as e:
             printer.out(f"! {e.message}")
+
+
+def _confirm_cost(room: str, name: str, text: str) -> str:
+    """Ask before sending a message that would wake agents costing a lot.
+
+    Returns "sent-as-is" (no question was needed), "yes", "fyi" (send without waking anyone) or "cancel".
+    """
+    pre = client.request("wake_preview", room=room, author=name, body=text, **{"from": "human"})
+    over = pre["confirm_over"]
+    if not over or pre["passive"] or pre["total"] < over:
+        return "sent-as-is"
+    who = ", ".join(f"{w['name']} {w['tokens'] // 1000}k" + (" cold" if w["cold"] else "") for w in pre["wakes"])
+    reply = input(f"this wakes {len(pre['wakes'])} agents, about {pre['total']:,} tokens ({who}). send? [y/N/f=as fyi] ")
+    return {"y": "yes", "yes": "yes", "f": "fyi", "fyi": "fyi"}.get(reply.strip().lower(), "cancel")
 
 
 def _erase_typed(raw: str) -> None:
@@ -151,6 +179,18 @@ def _command(line: str, room: str, name: str) -> bool:
         for label, key in (("added and notified", "added"), ("already in the room", "already"), ("not reached", "unreachable")):
             if res[key]:
                 print(f"  {label}: {', '.join(res[key])}")
+    elif cmd == "wrapup":
+        if not rest or " " in rest.strip():
+            raise AcmError("bad_request", "usage: /wrapup AGENT (exactly one agent)")
+        from acm import summary
+
+        text = summary.wrapup_request(rest.strip())
+        if _confirm_cost(room, name, text) == "cancel":
+            print("not sent")
+        else:
+            res = client.request("post", room=room, author=name, body=text, **{"from": "human"})
+            for who in res["wake"]["unreachable"]:
+                print(f"  not reached: {who}")
     elif cmd == "fyi":
         if not rest:
             raise AcmError("bad_request", "usage: /fyi TEXT")
@@ -163,7 +203,10 @@ def _command(line: str, room: str, name: str) -> bool:
         if input(f"close {room}? this cannot be undone [y/N] ").strip().lower() not in ("y", "yes"):
             print("not closed")
             return False
-        client.request("close_room", name=room, by=name)
+        res = client.request("close_room", name=room, by=name)
+        print(res["summary"])
+        if res["exported"]:
+            print(f"\nsaved to {res['exported']}")
         return True
     else:
         raise AcmError("bad_request", f"unknown command: /{cmd} (try /help)")

@@ -23,6 +23,25 @@ def usage_line(msg_id, req_id, inp, out, cc=0, cr=0, ts=None):
     })
 
 
+class mock_env:
+    """Set environment variables for a block of the test process (the daemon is unaffected)."""
+
+    def __init__(self, **values):
+        self.values, self.old = values, {}
+
+    def __enter__(self):
+        for k, v in self.values.items():
+            self.old[k] = os.environ.get(k)
+            os.environ[k] = v
+
+    def __exit__(self, *exc):
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 class GuardrailTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -289,6 +308,104 @@ class GuardrailTest(unittest.TestCase):
         self.assertIn("woken again", run("snooze", "mig", "off").stdout)
         self.assertNotIn("mig", self.client.request("budget", room="g10c")["snoozed"])
 
+    # -- cost preview ------------------------------------------------------
+
+    def preview(self, room, body, **extra):
+        return self.client.request("wake_preview", room=room, author="kit", body=body, **{"from": "human"}, **extra)
+
+    def test_10d_preview_estimates_the_cost_without_posting(self):
+        r = self.room("g10d", agents=("arx", "hub", "mig"))
+        self.sessions["arx"].write_record("idle", int(time.time() * 1000))  # arx is warm, the others have been idle for ages
+        pre = self.preview(r, "@arx @hub hello")
+        by = {w["name"]: w for w in pre["wakes"]}
+        self.assertEqual((by["arx"]["tokens"], by["arx"]["cold"]), (25000, False))
+        self.assertEqual((by["hub"]["tokens"], by["hub"]["cold"]), (90000, True))
+        self.assertEqual(pre["total"], 115000)
+        self.assertEqual(pre["confirm_over"], 100000)
+        self.assertEqual([m for m in self.client.request("read", room=r, member="viewer", since=0)["messages"] if m["kind"] == "post"], [])
+        self.assertEqual(self.preview(r, "@arx @hub fyi", no_reply_needed=True)["passive"], "no_reply_needed")
+        self.client.request("snooze", name="mig", seconds=60)
+        pre = self.preview(r, "@mig @ghost hi")
+        self.assertEqual(pre["wakes"], [])
+        self.assertTrue(any(x.startswith("mig (snoozed until") for x in pre["unreachable"]))
+        self.assertIn("ghost (not in room)", pre["unreachable"])
+        self.client.request("unsnooze", name="mig")
+        self.sessions["arx"].write_record("idle", 0)
+
+    def test_10e_preview_uses_what_waking_that_agent_really_cost(self):
+        sess, path = self.transcript_session("hist", 940010, "sess-hist")
+        r = self.room("g10e", agents=("hist",))
+        self.post(r, "kit", "@hist go", kind="human")
+        sess.wait_for(1)
+        with open(path, "a") as f:
+            f.write(usage_line("m1", "q1", 10, 20, 0, 1000) + "\n")  # 130
+            f.write(usage_line("m2", "q2", 100, 200, 300, 0) + "\n")  # 600
+        sess.write_record("idle", int(time.time() * 1000) + 500)
+        end = time.time() + 5
+        while time.time() < end and self.budget(r)["usage"]["wake"] == 0:
+            time.sleep(0.1)
+        self.client.request("read", room=r, member="hist", kind="agent")
+        pre = self.preview(r, "@hist again")
+        self.assertEqual(pre["wakes"][0]["tokens"], 730)
+        self.assertEqual(pre["wakes"][0]["history"], 1)
+
+    def test_10f_overlapping_wakes_in_two_rooms_split_the_transcript(self):
+        sess, path = self.transcript_session("busy", 940011, "sess-busy")
+        a = self.room("g10fa", agents=("busy",))
+        b = self.room("g10fb", agents=("busy",))
+        self.post(a, "kit", "@busy question in a", kind="human")
+        sess.wait_for(1)
+        with open(path, "a") as f:
+            f.write(usage_line("m1", "q1", 100, 0) + "\n")  # spent while working on room a
+        self.post(b, "kit", "@busy question in b", kind="human")  # woken for b while still busy
+        sess.wait_for(2)
+        with open(path, "a") as f:
+            f.write(usage_line("m2", "q2", 400, 0) + "\n")  # spent after the second wake
+        sess.write_record("idle", int(time.time() * 1000) + 500)
+        end = time.time() + 6
+        while time.time() < end and not (self.budget(a)["usage"]["wake"] and self.budget(b)["usage"]["wake"]):
+            time.sleep(0.1)
+        self.assertEqual(self.budget(a)["usage"]["wake"], 100)  # not 500: b's tokens are not counted twice
+        self.assertEqual(self.budget(b)["usage"]["wake"], 400)
+
+    def room_client(self, room, text, answer=None):
+        return subprocess.run(
+            [sys.executable, "-m", "acm", "--as", "kit", "room", room], capture_output=True, text=True,
+            input=text + "\n" + (answer + "\n" if answer is not None else ""), timeout=30,
+        )
+
+    def test_10g_room_client_asks_before_an_expensive_post(self):
+        r = self.room("g10g", agents=("arx", "hub"), confirm_wake_tokens=1000)
+        before = self.count("arx")
+        out = self.room_client(r, "@arx @hub expensive?", "n")
+        self.assertIn("this wakes 2 agents, about 180,000 tokens (arx 90k cold, hub 90k cold). send? [y/N/f=as fyi]", out.stdout)
+        self.assertIn("not sent", out.stdout)
+        self.assertEqual([m["body"] for m in self.client.request("read", room=r, member="viewer", since=0)["messages"] if m["kind"] == "post"], [])
+        out = self.room_client(r, "@arx @hub as an fyi", "f")
+        posts = [m for m in self.client.request("read", room=r, member="viewer", since=0)["messages"] if m["kind"] == "post"]
+        self.assertEqual([(m["body"], m["no_reply_needed"]) for m in posts], [("@arx @hub as an fyi", True)])
+        time.sleep(0.3)
+        self.assertEqual(self.count("arx"), before)  # nobody was woken
+        self.room_client(r, "@arx now for real", "y")
+        self.assertEqual(self.sessions["arx"].wait_for(before + 1)[-1].count("now for real"), 1)
+
+    def test_10h_room_client_does_not_ask_below_the_threshold_or_for_fyi(self):
+        r = self.room("g10h", agents=("arx",), confirm_wake_tokens=1000000)
+        out = self.room_client(r, "@arx cheap enough")
+        self.assertNotIn("send? [y/N", out.stdout)
+        self.assertIn("cheap enough", [m["body"] for m in self.client.request("read", room=r, member="viewer", since=0)["messages"]][-1])
+        r2 = self.room("g10h2", agents=("arx",), confirm_wake_tokens=1)
+        out = self.room_client(r2, "/fyi @arx thanks")
+        self.assertNotIn("send? [y/N", out.stdout)
+
+    def test_10i_post_dry_run_shows_the_estimate_and_posts_nothing(self):
+        r = self.room("g10i", agents=("arx",))
+        out = subprocess.run([sys.executable, "-m", "acm", "--as", "kit", "post", r, "@arx hi", "--dry-run"], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("would wake arx: about 90,000 tokens (cold: its cache has probably expired)", out.stdout)
+        self.assertIn("total about 90,000 weighted tokens", out.stdout)
+        self.assertEqual([m for m in self.client.request("read", room=r, member="viewer", since=0)["messages"] if m["kind"] == "post"], [])
+
     # -- account usage limits ---------------------------------------------
 
     def write_limits(self, five=None, seven=None):
@@ -331,6 +448,50 @@ class GuardrailTest(unittest.TestCase):
         junk = subprocess.run([sys.executable, "-m", "acm", "limits-tap"], input="not json", capture_output=True, text=True)
         self.assertEqual((junk.returncode, junk.stdout, junk.stderr), (0, "", ""))  # never breaks the status line
         self.assertIn("5-hour: 24% used", subprocess.run([sys.executable, "-m", "acm", "limits"], capture_output=True, text=True).stdout)
+
+    def omarchy_cache(self, session_pct, week_pct, fetched_ago=0, resets_in=3 * 3600):
+        reset = lambda secs: time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() + secs))
+        path = os.path.join(self.tmp.name, "omarchy-limits.json")
+        with open(path, "w") as f:
+            json.dump({"fetchedAtMs": int((time.time() - fetched_ago) * 1000), "limits": [
+                {"label": "Session (5-hour)", "percent": session_pct, "resetsAt": reset(resets_in)},
+                {"label": "Weekly (7-day)", "percent": week_pct, "resetsAt": reset(2 * 86400)},
+                {"label": "Opus (7-day)", "percent": 0.9, "resetsAt": reset(86400)},  # a model-scoped limit: ignored
+            ]}, f)
+        return path
+
+    def test_12b_the_omarchy_usage_cache_is_read_when_present_and_the_newest_source_wins(self):
+        from acm import usagelimits
+        cache = self.omarchy_cache(0.35, 0.5)
+        with mock_env(ACM_OMARCHY_USAGE_CACHE=cache):
+            cur = usagelimits.current()
+            self.assertEqual(cur["five_hour"]["used_percentage"], 35.0)  # a fraction becomes a percentage
+            self.assertEqual(cur["seven_day"]["used_percentage"], 50.0)
+            self.assertEqual(cur["five_hour"]["source"], "Omarchy usage cache")
+            self.assertEqual(len(cur), 2)
+            self.write_limits(five=80)  # the status-line tap wrote more recently
+            self.assertEqual(usagelimits.current()["five_hour"]["used_percentage"], 80)
+            self.assertEqual(usagelimits.current()["five_hour"]["source"], "status line")
+            self.assertEqual(usagelimits.current()["seven_day"]["used_percentage"], 50.0)  # tap has no week: cache fills in
+            old = self.omarchy_cache(0.1, 0.1, fetched_ago=3600)  # an older cache loses to the tap
+            with mock_env(ACM_OMARCHY_USAGE_CACHE=old):
+                self.assertEqual(usagelimits.current()["five_hour"]["used_percentage"], 80)
+            expired = self.omarchy_cache(0.9, 0.9, resets_in=-60)  # a window that has already reset is dropped
+            with mock_env(ACM_OMARCHY_USAGE_CACHE=expired):
+                os.remove(self.limits_file)
+                self.assertNotIn("five_hour", usagelimits.current())  # its window is over; the week's is still open
+                self.assertIn("seven_day", usagelimits.current())
+        with mock_env(ACM_OMARCHY_USAGE_CACHE="/no/such/file.json"):
+            os.path.exists(self.limits_file) and os.remove(self.limits_file)
+            self.assertEqual(usagelimits.current(), {})
+
+    def test_12c_acm_limits_names_the_source_and_age(self):
+        cache = self.omarchy_cache(0.04, 0.35, fetched_ago=600)
+        env = {**os.environ, "ACM_OMARCHY_USAGE_CACHE": cache}
+        out = subprocess.run([sys.executable, "-m", "acm", "limits"], env=env, capture_output=True, text=True).stdout
+        self.assertIn("5-hour: 4% used", out)
+        self.assertIn("7-day: 35% used", out)
+        self.assertIn("(Omarchy usage cache, 10 min ago)", out)
 
     def test_13_room_share_estimate_pauses_a_heavy_room(self):
         for stale in glob.glob(os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", "*", "*.jsonl")):

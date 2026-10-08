@@ -18,8 +18,8 @@ import traceback
 from collections import deque
 from pathlib import Path
 
-from acm import accounting, config, identity, paths, usagelimits, wake
-from acm.db import Store
+from acm import accounting, config, identity, paths, summary, usagelimits, wake
+from acm.db import Store, parse_mentions
 from acm.errors import AcmError
 
 LINE_LIMIT = 8 * 1024 * 1024
@@ -27,13 +27,15 @@ PENDING_TTL = 120.0  # a woken agent that has not read yet is not woken again fo
 TICK_SECS = float(os.environ.get("ACM_TICK_SECS", "30"))
 ACCOUNT_POLL_SECS = float(os.environ.get("ACM_ACCOUNT_POLL_SECS", "2"))
 ACCOUNT_MAX_SECS = 900.0  # stop waiting for a woken session to go idle after this long
+CACHE_TTL_SECS = 300  # an agent idle for longer than this has probably lost its prompt cache
 
 
 # Room administration is for humans. Three checks tell an agent's process from a human's; each stops a
 # different way of getting around the one before. None stops a process that works hard to look human
 # (everything runs as the same user), so they guard against accidents and honest mistakes.
 HUMAN_ONLY_OPS = {
-    "create_room", "close_room", "kill_room", "mute", "unmute", "set_limits", "invite", "snooze", "unsnooze", "shutdown",
+    "create_room", "close_room", "kill_room", "mute", "unmute", "set_limits", "invite", "snooze", "unsnooze", "link",
+    "shutdown",
 }
 # Set in the environment of anything a Claude Code session starts, and inherited by processes it detaches.
 SESSION_ENV_MARKERS = {
@@ -105,6 +107,7 @@ class Daemon:
         self.rate: dict[tuple[str, str], deque] = {}  # (room, agent) -> recent (time, cost) of its posts
         self.agent_turns: dict[str, int] = {}  # room -> agent-to-agent wakes since the last human message
         self.warned: set[tuple[str, str]] = set()  # (room, cap) already warned about
+        self.spans: dict[str, dict] = {}  # agent -> the token-accounting span currently open for it
         store.on_system = lambda room, msg: self._publish(room, {"event": "message", "message": msg})
 
     def _publish(self, room: str, event: dict) -> None:
@@ -136,25 +139,35 @@ class Daemon:
             self.store.register_agent(name, sess["pid"], sess["messagingSocketPath"])
             self.store.join(room, name, "agent", pending=True)  # not "joined" until it acts
             state = wake.session_state(self.store, name)
+            sent_at = wake.now()
             try:
                 await wake.deliver(sess["messagingSocketPath"], wake.invite_text(room, by, info["topic"]))
             except (OSError, asyncio.TimeoutError):
                 out["unreachable"].append(f"{name} (added, but its inbox is not reachable)")
                 continue
-            self._track(room, name, state)
+            self._track(room, name, state, sent_at)
             out["added"].append(name)
         if out["added"]:
             self.store.post_system(room, f"{by} added {', '.join(out['added'])}")
         return out
 
-    def _track(self, room: str, name: str, state: dict | None) -> None:
-        """Bookkeeping after a wake was delivered: block repeat wakes, check it landed, count its tokens."""
-        sent_at = wake.now()
+    def _track(self, room: str, name: str, state: dict | None, sent_at: float) -> None:
+        """Bookkeeping after a wake was delivered: block repeat wakes, check it landed, count its tokens.
+
+        `sent_at` is taken before delivery: a fast session can react before delivery even returns.
+        """
         self.pending[(room, name)] = time.monotonic()
         self._spawn(self._confirm(room, name, sent_at, self.store.cursor_of(room, name)))
-        if state is not None:
-            path = accounting.find_transcript(state.get("session_id"))
-            self._spawn(self._account(room, name, sent_at, accounting.size(path), path))
+        if state is None:
+            return
+        path = accounting.find_transcript(state.get("session_id"))
+        offset = accounting.size(path)
+        previous = self.spans.get(name)
+        if previous is not None:
+            previous["end"] = offset  # an agent is one stream of work: the earlier wake's span stops where this starts
+        span = {"room": room, "name": name, "sent_at": sent_at, "offset": offset, "path": path, "end": None}
+        self.spans[name] = span
+        self._spawn(self._account(span))
 
     async def dispatch_async(self, req: dict) -> dict:
         op = req.get("op")
@@ -164,6 +177,8 @@ class Daemon:
             return await self.post(req)
         if op == "budget":
             return await self.budget(_need(req, "room"))
+        if op == "wake_preview":
+            return await self.preview(req)
         return self.dispatch(req)
 
     async def pause_reason(self, room: str, lim: dict) -> str | None:
@@ -237,15 +252,16 @@ class Daemon:
         self.enforce(room)
         return {"message": msg, "wake": wake_result, "notices": notices}
 
-    async def notify(self, msg: dict, lim: dict, from_agent: bool) -> dict:
-        """Wake the agents a message addresses and notify the humans. Reports what happened to each."""
-        room, author = msg["room"], msg["author"]
+    async def _targets(self, msg: dict, lim: dict, from_agent: bool) -> tuple[dict, list, dict]:
+        """Decide who a message would wake, without waking anyone. Returns (report, [(name, state)], plan)."""
+        room = msg["room"]
         out: dict = {
             "woke": [], "already_pending": [], "unreachable": [], "notified": [], "suppressed": None, "passive": None,
         }
+        p = {"agents": [], "humans": [], "skipped": [], "everyone": False}
         if msg["no_reply_needed"]:
             out["passive"] = "no_reply_needed"
-            return out
+            return out, [], p
         p = wake.plan(self.store, msg)
         out["unreachable"] = list(p["skipped"])
         agents = p["agents"]
@@ -258,7 +274,7 @@ class Daemon:
         elif agents and from_agent and cooldown and turns >= cooldown:
             out["suppressed"] = f"cooldown: {turns} agent-to-agent wakes in a row, a human message restarts it"
             agents = []
-        sends = []
+        targets = []
         snoozed = self.store.snoozed()
         for name in agents:
             if name in snoozed:
@@ -272,20 +288,56 @@ class Daemon:
             if state is None:
                 out["unreachable"].append(f"{name} (no live session)")
                 continue
+            targets.append((name, state))
+        return out, targets, p
+
+    async def notify(self, msg: dict, lim: dict, from_agent: bool) -> dict:
+        """Wake the agents a message addresses and notify the humans. Reports what happened to each."""
+        room, author = msg["room"], msg["author"]
+        out, targets, p = await self._targets(msg, lim, from_agent)
+        sends = []
+        for name, state in targets:
             inline = msg["body"] if lim["inline_human"] and msg["from"] == "human" else None
             text = wake.wake_text(room, author, p["everyone"], self.store.unread_count(room, name), inline)
             sends.append((name, state, text))
+        sent_at = wake.now()
         results = await asyncio.gather(*(wake.deliver(st["inbox"], text) for _, st, text in sends), return_exceptions=True)
         for (name, state, _), result in zip(sends, results):
             if isinstance(result, BaseException):
                 out["unreachable"].append(f"{name} (inbox not reachable)")
                 continue
             out["woke"].append(name)
-            self._track(room, name, state)
+            self._track(room, name, state, sent_at)
         for human in p["humans"]:
             out["notified"].append(human)
             self._spawn(wake.notify_desktop(f"acm: {room}", f"{author}: {msg['body']}"))
         return out
+
+    def _estimate(self, name: str, state: dict) -> dict:
+        """What waking this agent now should cost: its usual warm figure, or its cold one if its cache has likely expired."""
+        cost = self.store.wake_cost(name)
+        idle_secs = time.time() - state["status_at"] / 1000 if state["status"] == "idle" else 0
+        cold = idle_secs > CACHE_TTL_SECS
+        return {"name": name, "tokens": int(cost["cold"] if cold else cost["warm"]), "cold": cold, "history": cost["n"]}
+
+    async def preview(self, req: dict) -> dict:
+        """Who a message would wake and about what that would cost, without posting it."""
+        room, author, body = _need(req, "room"), _need(req, "author"), _need(req, "body")
+        if not isinstance(body, str):
+            raise AcmError("bad_request", "body must be text")
+        lim = self.store.limits(room)
+        from_kind = req.get("from", "human")
+        msg = {
+            "room": room, "author": author, "body": body, "from": from_kind,
+            "no_reply_needed": bool(req.get("no_reply_needed", False)), "mentions": parse_mentions(body),
+        }
+        out, targets, p = await self._targets(msg, lim, from_kind == "agent")
+        wakes = [self._estimate(n, st) for n, st in targets]
+        return {
+            "wakes": wakes, "total": sum(w["tokens"] for w in wakes), "notified": p["humans"],
+            "suppressed": out["suppressed"], "passive": out["passive"], "already_pending": out["already_pending"],
+            "unreachable": out["unreachable"], "confirm_over": lim["confirm_wake_tokens"],
+        }
 
     async def budget(self, room: str) -> dict:
         s = self.store
@@ -299,15 +351,18 @@ class Daemon:
             "snoozed": self.store.snoozed(),
         }
 
-    async def _account(self, room: str, name: str, sent_at: float, offset: int, path) -> None:
-        """When a woken session goes idle again, count the tokens it spent since the wake."""
+    async def _account(self, span: dict) -> None:
+        """Count the tokens a woken session spends, from the wake until it is idle again or woken for another room."""
+        room, name = span["room"], span["name"]
         deadline = time.monotonic() + ACCOUNT_MAX_SECS
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and span["end"] is None:
             await asyncio.sleep(ACCOUNT_POLL_SECS)
             state = wake.session_state(self.store, name)
-            if state is None or (state["status"] == "idle" and state["status_at"] / 1000 >= sent_at):
+            if state is None or (state["status"] == "idle" and state["status_at"] / 1000 >= span["sent_at"]):
                 break
-        used = accounting.usage_since(path, offset)
+        if self.spans.get(name) is span:
+            del self.spans[name]
+        used = accounting.usage_since(span["path"], span["offset"], span["end"])
         if any(used.values()):
             try:
                 self.store.add_usage(
@@ -370,6 +425,71 @@ class Daemon:
         self._publish(room, {"event": "warning", "room": room, "text": text})
         await wake.notify_desktop(f"acm: {room}", text)
 
+    @staticmethod
+    def _project_dir(path) -> str | None:
+        if path in (None, "", "none"):
+            return None
+        resolved = Path(str(path)).expanduser().resolve()
+        if not resolved.is_dir():
+            raise AcmError("bad_request", f"not a directory: {resolved}")
+        return str(resolved)
+
+    def _create(self, req: dict) -> dict:
+        s, name = self.store, _need(req, "name")
+        source = req.get("continue_from")
+        carried = None
+        pdir = self._project_dir(req.get("dir"))
+        if source:  # check the source before creating anything
+            src_info = s.get_room(source)
+            pdir = pdir or src_info["project_dir"]
+            carried = summary.render(summary.with_ref_notes(summary.build(s, source)))
+        room = s.create_room(name, _need(req, "by"), req.get("topic", ""))
+        if pdir:
+            room = s.set_project_dir(name, pdir)
+        if carried:
+            s.post_system(name, f"continued from {source}\n\n{carried}")
+        return {"room": room}
+
+    def _export_path(self, room: str) -> Path:
+        directory = self.store.limits(room)["export_dir"]
+        return (Path(directory).expanduser() if directory else paths.data_dir() / "rooms") / f"{room}.md"
+
+    def _close(self, op: str, req: dict) -> dict:
+        """Close a room: write its summary into the log, save it to a file and tell the human the outcome."""
+        s, name, by = self.store, _need(req, "name"), _need(req, "by")
+        info = s.get_room(name)
+        if info["status"] != "open":
+            raise AcmError("room_closed", f"room is closed: {name}")
+        if op != "kill_room" and info["created_by"] != by:
+            raise AcmError("forbidden", f"only the creator ({info['created_by']}) can close {name}")
+        data = summary.with_ref_notes(summary.build(s, name, closing_by=by))
+        data["ended"] = time.time()
+        room = s.close_room(name, by, force=op == "kill_room", summary=summary.render(data))
+        self._publish(name, {"event": "closed", "room": room})
+        exported = None
+        try:
+            path = self._export_path(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(summary.render(data, title=True) + "\n\n" + summary.transcript(s, name) + "\n")
+            tmp.replace(path)
+            exported = str(path)
+        except OSError as e:
+            print(f"[{name}] could not save the summary: {e}", file=sys.stderr, flush=True)
+        final = summary.final_decision(data)
+        self._spawn(wake.notify_desktop(
+            f"acm: {name} closed", f"Final decision: {final}" if final else "No decisions were pinned."
+        ))
+        for key in [k for k in self.pending if k[0] == name]:
+            del self.pending[key]
+        self.agent_turns.pop(name, None)
+        return {"room": room, "summary": summary.render(data), "exported": exported, "final_decision": final}
+
+    @staticmethod
+    def _kind(req: dict, default: str = "human") -> str:
+        """The member kind to create. A caller inside a Claude session can only ever be an agent."""
+        return "agent" if req.get("_agentish") else req.get("kind", default)
+
     def dispatch(self, req: dict) -> dict:
         s = self.store
         op = _need(req, "op")
@@ -379,17 +499,32 @@ class Daemon:
             self.stop.set()
             return {}
         if op == "create_room":
-            return {"room": s.create_room(_need(req, "name"), _need(req, "by"), req.get("topic", ""))}
+            return self._create(req)
         if op == "get_room":
             return {"room": s.get_room(_need(req, "name"))}
         if op == "list_rooms":
             return {"rooms": s.list_rooms(req.get("status"), req.get("member"))}
         if op in ("close_room", "kill_room"):
-            room = s.close_room(_need(req, "name"), _need(req, "by"), force=op == "kill_room")
-            self._publish(room["name"], {"event": "closed", "room": room})
-            return {"room": room}
+            return self._close(op, req)
+        if op == "summary":
+            data = summary.with_ref_notes(summary.build(s, _need(req, "room")))
+            return {"summary": summary.render(data), "final_decision": summary.final_decision(data)}
+        if op == "export":
+            room = _need(req, "room")
+            data = summary.with_ref_notes(summary.build(s, room))
+            text = summary.render(data, title=True)
+            if not req.get("summary_only"):
+                text += "\n\n" + summary.transcript(s, room)
+            return {"text": text + "\n"}
+        if op == "search":
+            return {"matches": s.search(
+                _need(req, "query"), req.get("room"), req.get("author"), req.get("status"),
+                int(req.get("limit", 50)), bool(req.get("include_system", False)),
+            )}
+        if op == "link":
+            return {"room": s.set_project_dir(_need(req, "room"), self._project_dir(req.get("dir")))}
         if op == "join":
-            return {"member": s.join(_need(req, "room"), _need(req, "member"), req.get("kind", "human"))}
+            return {"member": s.join(_need(req, "room"), _need(req, "member"), self._kind(req))}
         if op == "leave":
             s.leave(_need(req, "room"), _need(req, "member"))
             return {}
@@ -419,7 +554,7 @@ class Daemon:
                 limit=req.get("limit"),
                 exclude_own=bool(req.get("exclude_own", False)),
                 decisions=req.get("decisions", "all"),
-                kind=req.get("kind", "human"),
+                kind=self._kind(req),
             )
         if op == "catch_up":
             self.pending.pop((req.get("room"), req.get("member")), None)
@@ -448,6 +583,8 @@ class Daemon:
                     get.cancel()
                     return
                 await self._send(writer, get.result())
+        except ConnectionError:
+            return  # the watcher went away
         finally:
             eof.cancel()
             self.watchers[room].discard(q)
@@ -462,6 +599,8 @@ class Daemon:
                     if not isinstance(req, dict):
                         raise AcmError("bad_request", "request must be a JSON object")
                     guard(req, peer)
+                    if peer["in_session"] or peer["marked"]:
+                        req["_agentish"] = True
                     if req.get("op") == "watch":
                         await self._watch(req, reader, writer)
                         return

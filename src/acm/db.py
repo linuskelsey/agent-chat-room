@@ -88,6 +88,9 @@ MIGRATIONS = [
         until REAL NOT NULL
     );
     """,
+    """
+    ALTER TABLE rooms ADD COLUMN project_dir TEXT;
+    """,
 ]
 
 
@@ -191,6 +194,7 @@ class Store:
             "created_at": r["created_at"],
             "closed_at": r["closed_at"],
             "closed_by": r["closed_by"],
+            "project_dir": r["project_dir"],
         }
 
     def list_rooms(self, status: str | None = None, member: str | None = None) -> list[dict]:
@@ -216,8 +220,13 @@ class Store:
             out.append(room)
         return out
 
-    def close_room(self, name: str, by: str, force: bool = False, reason: str | None = None) -> dict:
-        """Close a room. Only the creator may close it unless `force` (the human kill switch)."""
+    def close_room(
+        self, name: str, by: str, force: bool = False, reason: str | None = None, summary: str | None = None
+    ) -> dict:
+        """Close a room. Only the creator may close it unless `force` (the human kill switch).
+
+        `summary` is written into the room after the closing line, as part of the same final system message.
+        """
         self._check_member_name(by)
         with self._tx():
             room = self._open_room(name)
@@ -230,7 +239,8 @@ class Store:
             how = "killed" if force and reason is None and room["created_by"] != by else "closed"
             self._insert(
                 room["id"], "system", "system", "system",
-                f"room {how} by {by}" + (f": {reason}" if reason else ""), now=now,
+                f"room {how} by {by}" + (f": {reason}" if reason else "") + (f"\n\n{summary}" if summary else ""),
+                now=now,
             )
         return self.get_room(name)
 
@@ -303,9 +313,39 @@ class Store:
                 "strikes": m["strikes"],
                 "joined": m["seen_at"] is not None,
                 "snoozed_until": snoozed.get(m["name"]),
+                "wake_cost": self.wake_cost(m["name"]) if m["kind"] == "agent" else None,
             }
             for m in rows
         }
+
+    def set_project_dir(self, room: str, path: str | None) -> dict:
+        """Link a room to a project directory (None unlinks). Used to resolve refs in summaries."""
+        with self._tx():
+            r = self._room(room)
+            self.conn.execute("UPDATE rooms SET project_dir = ? WHERE id = ?", (path, r["id"]))
+        return self.get_room(room)
+
+    def search(self, query: str, room: str | None = None, author: str | None = None,
+               status: str | None = None, limit: int = 50, include_system: bool = False) -> list[dict]:
+        """Messages containing `query` (case-insensitive), newest first, across rooms."""
+        if not isinstance(query, str) or not query.strip():
+            raise AcmError("bad_request", "search needs some text")
+        escaped = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        rows = self.conn.execute(
+            """
+            SELECT g.*, r.name AS room_name, r.status AS room_status
+              FROM messages g JOIN rooms r ON r.id = g.room_id
+             WHERE g.body LIKE :q ESCAPE '\\'
+               AND (:room IS NULL OR r.name = :room)
+               AND (:author IS NULL OR g.author = :author)
+               AND (:status IS NULL OR r.status = :status)
+               AND (:system = 1 OR g.kind != 'system')
+             ORDER BY g.id DESC LIMIT :limit
+            """,
+            {"q": f"%{escaped}%", "room": room, "author": author, "status": status,
+             "system": int(include_system), "limit": max(1, min(int(limit), 500))},
+        ).fetchall()
+        return [{**_message(x, x["room_name"]), "room_status": x["room_status"]} for x in rows]
 
     # -- limits, strikes and usage ----------------------------------------
 
@@ -366,6 +406,25 @@ class Store:
             (r["id"],),
         ).fetchone()
         return {"weighted": round(tot[0]), "wake": round(tot[1]), "post": round(tot[2]), "by_agent": by_agent}
+
+    COLD_CACHE_CREATION = 20000  # a wake that wrote this much cache found the agent's context expired
+
+    def wake_cost(self, agent: str) -> dict:
+        """What waking this agent has cost lately (weighted tokens): the usual warm wake and the cold one.
+
+        Based on its last 30 wakes in any room; falls back to typical figures when there is no history.
+        """
+        rows = self.conn.execute(
+            "SELECT weighted, cache_creation FROM usage WHERE agent = ? AND kind = 'wake' ORDER BY id DESC LIMIT 30",
+            (agent,),
+        ).fetchall()
+        warm = [r["weighted"] for r in rows if r["cache_creation"] <= self.COLD_CACHE_CREATION]
+        cold = [r["weighted"] for r in rows if r["cache_creation"] > self.COLD_CACHE_CREATION]
+        return {
+            "warm": sum(warm) / len(warm) if warm else 25000.0,
+            "cold": sum(cold) / len(cold) if cold else 90000.0,
+            "n": len(rows),
+        }
 
     def usage_since(self, room: str, since: float) -> float:
         r = self._room(room)

@@ -75,6 +75,7 @@ Delivery to idle sessions underpins everything else.
 - [X] Brevity: style preset sent once on join; posts over the soft target are accepted, and the post result tells the agent to be shorter next time.
 - [X] Verbosity strikes: repeated overlong posts count against the sender's rate limit and are shown to the human, and all post and wake tokens count against the room budget so verbosity has a visible cost.
 - [X] Hard ceiling set very high, only to stop runaway posts.
+- [X] Every limit can be switched off: `0` or `none` removes a cap, rate limit, cooldown or ceiling, and `style = "free"` removes the length target.
 - [X] Per-agent rate limit (N messages/min).
 - [X] Cooldown after 2 consecutive agent-only turns; a human post resets it.
 - [X] `no_reply_needed` flag: a flagged post is stored and appears on the next read, but wakes nobody and raises no notification, even if it contains `@mentions`.
@@ -119,9 +120,11 @@ Delivery to idle sessions underpins everything else.
 
 - [X] Socket `0600` in a private `0700` directory, and the client and daemon each check who owns the other end. Access to a room is controlled by `join_policy`, which defaults to `invited`: an agent sees and uses only rooms a human added it to, on every path (join, post, read, list, search, events). That replaces per-room tokens: the daemon already knows who was added, so a secret would add nothing. acm never executes anything on behalf of another session.
 - [X] Verify each session applies its own permission mode to room messages (`docs/delivery.md`: a session in `bypassPermissions` holds them until `crossSessionInbound` is `accept`).
-- [ ] Package as a Claude plugin marketplace entry (MCP server + hooks bundled, daemon auto-started by the MCP server).
-- [ ] README section on usage-limit budgets: how to chain `acm limits-tap` into a status-line command so the daemon can see the 5-hour and 7-day limits.
-- [ ] README and install docs, including the `crossSessionInbound: accept` requirement for sessions running in `bypassPermissions`.
+- [X] README with install from source, MCP registration, session naming, the `crossSessionInbound: accept` requirement for sessions in `bypassPermissions`, the unread hook and `acm statusline install` for usage-limit budgets.
+- [ ] Own Claude Code marketplace in this repository: `.claude-plugin/marketplace.json` plus a plugin manifest with `license`, `repository` and `homepage`, listing one plugin (`acm`) whose source is pinned to a commit SHA.
+- [X] Plugin bundles the MCP server (`acm-mcp`) and a `UserPromptSubmit` hook running `acm unread --hook`, and checks `claude plugin validate --strict` passes.
+- [X] Plugin install docs: add the marketplace, install the plugin, and install `acm` itself (the plugin needs the CLI on `PATH`).
+- [ ] Offer acm to Anthropic's directory through the developer portal (a paid plan is needed) once the own marketplace has been used by others.
 - [X] Security review (`SECURITY.md`): permissions and ownership of every file and directory, symlink-safe writes, never overwriting files acm did not write, bounded memory and input, terminal-escape sanitization, agent identity enforcement, SQL and subprocess audit.
 
 ## Later
@@ -138,7 +141,7 @@ Delivery to idle sessions underpins everything else.
 - Model-written summaries on close, as an opt-in extension of the pinned-decision summary.
 - Room templates (feature, bugfix, review) with preset budgets and roles.
 - Per-room cost dashboard using usage data from agents-monitor.
-- AUR / npm packaging.
+- PyPI, AUR and npm packaging.
 - Static binary (Go/Rust) if Python distribution proves awkward.
 
 ## Open questions

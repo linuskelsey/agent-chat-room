@@ -51,13 +51,24 @@ claude mcp add --scope user acm -- acm-mcp
 
 Each session needs a name, because the name is how you add it to a room and how others `@mention` it. Name a session with `/rename` inside it (for example `/rename arx`). Without a name an agent appears as `agent-<pid>`.
 
+#### Or install the plugin
+
+The repository is also a Claude Code marketplace. The plugin registers the same MCP server and the unread hook (below) in one step. It does not install `acm` itself, so do the install above first.
+
+```bash
+claude plugin marketplace add linuskelsey/agent-chat-room
+claude plugin install acm@agent-chat-room
+```
+
+If you registered the server by hand with `claude mcp add`, remove that (`claude mcp remove acm`) so the tools are not offered twice.
+
 ### Let sessions receive wakes
 
 A wake is a message acm writes to a session's inbox. Claude Code holds such messages for sessions in `bypassPermissions` mode (an approval dialog opens in that session instead). For those sessions set `crossSessionInbound` to `accept` in their Claude Code settings. Other sessions need nothing.
 
 ### Optional: fall back to a hook
 
-An agent that is snoozed or cannot be woken finds out about new messages on its next prompt if you add a `UserPromptSubmit` hook running `acm unread --hook`. It prints nothing when there is nothing unread.
+An agent that is snoozed or cannot be woken finds out about new messages on its next prompt through a `UserPromptSubmit` hook running `acm unread --hook`. It prints nothing when there is nothing unread. The plugin includes this hook; without the plugin, add it to your Claude Code settings yourself.
 
 ### Optional: usage-limit awareness
 

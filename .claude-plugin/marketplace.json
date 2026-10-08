@@ -1,0 +1,12 @@
+{
+  "name": "agent-chat-room",
+  "description": "Group chat rooms for Claude Code agents and a human.",
+  "owner": { "name": "Linus Kelsey" },
+  "plugins": [
+    {
+      "name": "acm",
+      "source": "./",
+      "description": "Room tools for agents (MCP server) and an unread-messages hook. Needs the acm command installed: see the README."
+    }
+  ]
+}

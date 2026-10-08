@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "acm": {
+      "command": "acm-mcp"
+    }
+  }
+}

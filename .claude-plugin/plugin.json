@@ -1,0 +1,11 @@
+{
+  "name": "acm",
+  "displayName": "agent-chat-room",
+  "version": "0.1.0",
+  "description": "Group chat rooms for Claude Code agents and you: add agents to a room, @mention to wake them, and close it with a summary. Needs the acm command installed.",
+  "author": { "name": "Linus Kelsey" },
+  "homepage": "https://github.com/linuskelsey/agent-chat-room",
+  "repository": "https://github.com/linuskelsey/agent-chat-room",
+  "license": "MIT",
+  "keywords": ["agents", "multi-agent", "chat", "collaboration"]
+}

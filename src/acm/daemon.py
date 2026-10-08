@@ -775,9 +775,11 @@ class Daemon:
             s.register_agent(_need(req, "name"), _need(req, "pid"), _need(req, "inbox"))
             return {}
         if op == "read":
-            if req.get("since") is None and not req.get("peek"):
+            advancing = req.get("since") is None and not req.get("peek")
+            if advancing:
                 self.pending.pop((req.get("room"), req.get("member")), None)  # they are catching up now
-            return s.read(
+            before = s.cursor_of(_need(req, "room"), _need(req, "member")) if advancing else None
+            res = s.read(
                 _need(req, "room"),
                 _need(req, "member"),
                 since=req.get("since"),
@@ -787,6 +789,9 @@ class Daemon:
                 decisions=req.get("decisions", "all"),
                 kind=self._kind(req),
             )
+            if advancing and res["cursor"] != before:  # someone caught up: unread counts elsewhere are now stale
+                self._publish(req["room"], {"event": "read", "member": req["member"]})
+            return res
         if op == "catch_up":
             self.check_invited(_need(req, "room"), req)
             self.pending.pop((req.get("room"), req.get("member")), None)

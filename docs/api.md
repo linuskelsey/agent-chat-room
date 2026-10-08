@@ -46,6 +46,7 @@ Send `{"op": "watch", "room": "<name>"}` for one room, or `{"op": "watch_all"}` 
 | `room_created` | `room` | a room is created |
 | `closed` | `room` | a room is closed |
 | `room_updated` | `what`: `mute`, `unmute`, `limits` or `link` | an admin change |
+| `read` | `member` | a member's read position moved, so their unread counts changed (not sent for a peek or when nothing was new) |
 | `warning` | `text` | a cap is near or reached, or a wake was not confirmed |
 | `quiet` | `text` | only when the room has `notify_when_quiet`: an agent posted, nobody was woken, every agent has stopped and nobody has spoken since, so it is the human's turn |
 | `attention` | `agent`, `waiting`, `text` | a woken agent has been stuck for a few seconds on an approval or question in its own Claude Code window (`waiting: true`), or is no longer stuck |

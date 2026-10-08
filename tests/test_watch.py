@@ -76,6 +76,20 @@ class WatchTest(unittest.TestCase):
         self.assertEqual([(e["event"], e["what"], e["room_name"]) for e in evs],
                          [("room_updated", "mute", "we"), ("room_updated", "limits", "we")])
 
+    def test_03b_catching_up_arrives_as_a_read_event_only_when_the_cursor_moves(self):
+        self.client.request("create_room", name="wread", by="kit")
+        self.client.request("join", room="wread", member="arx", kind="agent")
+        self.client.request("post", room="wread", author="arx", body="hello", **{"from": "agent"})
+        w = self.client.watch("wread")
+        self.addCleanup(w.close)
+        self.client.request("read", room="wread", member="kit", peek=True)  # looking does not move it
+        self.client.request("read", room="wread", member="kit")  # reading does
+        self.client.request("read", room="wread", member="kit")  # nothing new: no event
+        self.client.request("post", room="wread", author="arx", body="again", **{"from": "agent"})
+        evs = self.events(w, 2)
+        self.assertEqual((evs[0]["event"], evs[0]["member"], evs[0]["room_name"]), ("read", "kit", "wread"))
+        self.assertEqual(evs[1]["event"], "message")
+
     def test_04_cap_warnings_arrive_on_the_stream(self):
         self.client.request("create_room", name="wf", by="kit")
         self.client.request("set_limits", room="wf", updates={"max_messages": 5})
